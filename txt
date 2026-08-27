@@ -1,0 +1,45 @@
+npm create vite@latest my-react-app -- --template react
+C:\Users\cheer\OneDrive\Desktop\Cheer\90k\ChaPanaKit>npm create vite@latest my-react-app -- --template react
+Need to install the following packages:
+create-vite@9.2.0
+Ok to proceed? (y) y
+
+> npx
+> create-vite my-react-app --template react
+
+│
+◇  Which linter to use?
+│  Oxlint
+│
+◇  Install with npm and start now?
+│  Yes
+│
+◇  Scaffolding project in C:\Users\cheer\OneDrive\Desktop\Cheer\90k\ChaPanaKit\my-react-app...
+│
+◇  Installing dependencies with npm...
+
+added 24 packages, and audited 25 packages in 14s
+
+9 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities
+│
+◇  Starting dev server...
+
+> my-react-app@0.0.0 dev
+> vite
+
+
+cd C:\Users\cheer\OneDrive\Desktop\Cheer\90k\ChaPanaKit\my-react-app
+npm run dev
+
+
+import logoImg from "./assets/logoCC.png";
+
+{/* <div className="w-12 h-12 rounded-full bg-emerald-700 text-white flex items-center justify-center mx-auto mb-3 font-serif font-bold">ฌ</div> */}
+          <img 
+            src={logoImg} // หรือใส่ path เช่น "/logo.png"
+            alt="โลโก้สมาคม" 
+            className="w-32 h-32 mx-auto mb-3 object-contain rounded-full" 
+          />
