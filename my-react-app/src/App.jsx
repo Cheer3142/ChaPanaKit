@@ -52,6 +52,26 @@ function thaiMonthLabel(period) {
   const [year, month] = String(period || "").split("-").map(Number);
   return year && month ? `${THAI_MONTHS_FULL[month - 1]} ${year + 543}` : "-";
 }
+function monthsBetween(startPeriod, endPeriod) {
+  const [sy, sm] = String(startPeriod).split("-").map(Number);
+  const [ey, em] = String(endPeriod).split("-").map(Number);
+  if (!sy || !sm || !ey || !em) return [];
+  const out = [];
+  let y = sy, m = sm;
+  while (y < ey || (y === ey && m <= em)) {
+    out.push(`${y}-${String(m).padStart(2, "0")}`);
+    m += 1;
+    if (m > 12) { m = 1; y += 1; }
+  }
+  return out;
+}
+function getOverdueMonthsForMember(member, vouchers, uptoPeriod) {
+  const joinPeriod = member.joinDate?.slice(0,7);
+  if (!joinPeriod || joinPeriod > uptoPeriod) return [];
+  const dueMonths = monthsBetween(joinPeriod, uptoPeriod);
+  const paidSet = new Set(vouchers.filter(v => !v.cancelled && v.category === "เงินสงเคราะห์รายเดือน" && v.memberId === member.id).map(v => v.paymentPeriod));
+  return dueMonths.filter(p => !paidSet.has(p));
+}
 function money(n) { return Number(n || 0).toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function genId(prefix) { return `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
 function padNo(n, len = 4) { return String(n).padStart(len, "0"); }
@@ -315,9 +335,13 @@ export default function App() {
             members={members} settings={settings} currentUser={currentUser}
           />
         )}
-        {view === "dues" && <DuesView members={members} vouchers={vouchers} settings={settings} onRecordPayment={(data)=>{
-          const seq = vouchers.filter(v=>v.type==="receipt").length + 1;
-          persistVouchers([...vouchers, { ...data, id: genId("RV"), type:"receipt", voucherNo:`RV-${data.date.replace(/-/g,"")}-${padNo(seq,3)}`, cancelled:false, verified:data.method==="cash", createdAt:Date.now(), createdBy:currentUser.name }]);
+        {view === "dues" && <DuesView members={members} vouchers={vouchers} settings={settings} onRecordPayment={(payments)=>{
+          let seq = vouchers.filter(v=>v.type==="receipt").length;
+          const newVouchers = payments.map((data) => {
+            seq += 1;
+            return { ...data, id: genId("RV"), type:"receipt", voucherNo:`RV-${data.date.replace(/-/g,"")}-${padNo(seq,3)}`, cancelled:false, verified:data.method==="cash", createdAt:Date.now(), createdBy:currentUser.name };
+          });
+          persistVouchers([...vouchers, ...newVouchers]);
         }} />}
         {view === "reports" && <ReportsView vouchers={vouchers} bankTransactions={bankTransactions} members={members} deathCalcs={deathCalcs} settings={settings} />}
         {view === "settings" && currentUser.role === "admin" && (
@@ -1047,6 +1071,15 @@ function FinancialView({ vouchers, setVouchers, bankTransactions, setBankTransac
     setVouchers([...vouchers, { ...data, id: genId(prefix), type: tab, voucherNo, cancelled: false, verified, createdAt: Date.now(), createdBy: currentUser.name }]);
     setShowForm(false);
   }
+  function addMonthlyPayments(payments) {
+    let seq = vouchers.filter(v=>v.type==="receipt").length;
+    const newVouchers = payments.map((data) => {
+      seq += 1;
+      return { ...data, id: genId("RV"), type: "receipt", voucherNo: `RV-${data.date.replace(/-/g,"")}-${padNo(seq,3)}`, cancelled: false, verified: data.method === "cash", createdAt: Date.now(), createdBy: currentUser.name };
+    });
+    setVouchers([...vouchers, ...newVouchers]);
+    setShowMonthlyForm(false);
+  }
   function cancelVoucher(id, reason) {
     setVouchers(vouchers.map(v => v.id === id ? { ...v, cancelled: true, cancelReason: reason, cancelledBy: currentUser.name, cancelledAt: Date.now() } : v));
     setCancelling(null);
@@ -1122,7 +1155,7 @@ function FinancialView({ vouchers, setVouchers, bankTransactions, setBankTransac
         <VoucherFormModal type={tab} members={members} settings={settings} onClose={()=>setShowForm(false)} onSave={addVoucher}
           categories={tab==="receipt"?RECEIPT_CATEGORIES:PAYMENT_CATEGORIES} />
       )}
-      {showMonthlyForm && <MonthlyPaymentModal members={members} vouchers={vouchers} settings={settings} onClose={()=>setShowMonthlyForm(false)} onSave={addVoucher} />}
+      {showMonthlyForm && <MonthlyPaymentModal members={members} vouchers={vouchers} settings={settings} onClose={()=>setShowMonthlyForm(false)} onSave={addMonthlyPayments} />}
       {cancelling && <CancelModal voucher={cancelling} onClose={()=>setCancelling(null)} onConfirm={(reason)=>cancelVoucher(cancelling.id, reason)} />}
       {viewingSlip && <ImageLightbox src={viewingSlip} onClose={()=>setViewingSlip(null)} />}
       {showQr && (
@@ -1218,34 +1251,138 @@ function VoucherFormModal({ type, members, settings, categories, onClose, onSave
   );
 }
 
-function MonthlyPaymentModal({ members, vouchers, settings, initialMember, initialPeriod, onClose, onSave }) {
-  const [f, setF] = useState({ memberId: initialMember?.id || "", period: initialPeriod || currentMonth(), date: todayISO(), amount: initialMember?.monthlyRate || settings.monthlyRate || "", method: "cash", bankAccount: "" });
-  const [error, setError] = useState("");
+function MonthlyPaymentModal({ members, vouchers, settings, initialMember, onClose, onSave }) {
   const activeMembers = members.filter(m => m.status === "active");
-  const member = activeMembers.find(m => m.id === f.memberId);
+  const [memberId, setMemberId] = useState(initialMember?.id || "");
+  const [date, setDate] = useState(todayISO());
+  const [method, setMethod] = useState("cash");
+  const [bankAccount, setBankAccount] = useState("");
+  const [slipImage, setSlipImage] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [selected, setSelected] = useState(() => new Set());
+  const [error, setError] = useState("");
+
+  const member = activeMembers.find(m => m.id === memberId);
+  const overdueMonths = member ? getOverdueMonthsForMember(member, vouchers, currentMonth()) : [];
+  const rate = member ? (member.monthlyRate || settings.monthlyRate || 0) : 0;
+
+  useEffect(() => {
+    setSelected(new Set(member ? getOverdueMonthsForMember(member, vouchers, currentMonth()) : []));
+    setError("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [memberId]);
+
+  function toggle(p) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(p)) next.delete(p); else next.add(p);
+      return next;
+    });
+  }
+  function toggleAll() {
+    setSelected(prev => prev.size === overdueMonths.length ? new Set() : new Set(overdueMonths));
+  }
+
+  const selectedPeriods = overdueMonths.filter(p => selected.has(p));
+  const totalAmount = selectedPeriods.length * rate;
+
+  async function handleSlipFile(ev) {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try { setSlipImage(await compressImage(file)); } catch (err) { console.error(err); }
+    setUploading(false);
+  }
+
   function save() {
     if (!member) { setError("กรุณาเลือกสมาชิก"); return; }
-    if (!f.period || !f.date || !f.amount || Number(f.amount) <= 0) { setError("กรุณากรอกงวด วันที่ และจำนวนเงินให้ครบ"); return; }
-    if (f.method === "bank" && !f.bankAccount) { setError("กรุณาเลือกบัญชีธนาคาร"); return; }
-    const duplicate = vouchers.some(v => !v.cancelled && v.category === "เงินสงเคราะห์รายเดือน" && v.memberId === member.id && v.paymentPeriod === f.period);
-    if (duplicate) { setError("สมาชิกคนนี้ชำระเงินสำหรับงวดนี้แล้ว"); return; }
-    onSave({ date:f.date, category:"เงินสงเคราะห์รายเดือน", partyName:member.name, memberId:member.id, memberNo:member.memberNo, paymentPeriod:f.period, amount:Number(f.amount), method:f.method, bankAccount:f.bankAccount, note:`ชำระเงินสงเคราะห์ประจำเดือน ${thaiMonthLabel(f.period)}`, slipImage:"" });
-    onClose();
+    if (selectedPeriods.length === 0) { setError("กรุณาเลือกอย่างน้อย 1 งวด"); return; }
+    if (!date) { setError("กรุณาเลือกวันที่รับเงิน"); return; }
+    if (method === "bank" && !bankAccount) { setError("กรุณาเลือกบัญชีธนาคาร"); return; }
+    const payments = selectedPeriods.map(p => ({
+      date, category: "เงินสงเคราะห์รายเดือน", partyName: member.name, memberId: member.id, memberNo: member.memberNo,
+      paymentPeriod: p, amount: rate, method, bankAccount: method === "bank" ? bankAccount : "",
+      note: `ชำระเงินสงเคราะห์ประจำเดือน ${thaiMonthLabel(p)}${selectedPeriods.length > 1 ? ` (ชำระรวม ${selectedPeriods.length} เดือนในครั้งเดียว)` : ""}`,
+      slipImage,
+    }));
+    onSave(payments);
   }
+
   return (
-    <Modal title="รับชำระเงินสงเคราะห์รายเดือน" onClose={onClose}>
+    <Modal title="รับชำระเงินสงเคราะห์รายเดือน" onClose={onClose} wide>
       <Field label="สมาชิก" error={error && !member ? error : ""}>
-        <Select value={f.memberId} onChange={e=>{ const m=activeMembers.find(x=>x.id===e.target.value); setF({...f, memberId:e.target.value, amount:m?.monthlyRate || settings.monthlyRate || ""}); setError(""); }}>
-          <option value="">— เลือกสมาชิก —</option>{activeMembers.map(m=><option key={m.id} value={m.id}>{m.memberNo} · {m.name}</option>)}
+        <Select value={memberId} onChange={e=>{ setMemberId(e.target.value); setError(""); }}>
+          <option value="">— เลือกสมาชิก —</option>
+          {activeMembers.map(m => <option key={m.id} value={m.id}>{m.memberNo} · {m.name}</option>)}
         </Select>
       </Field>
-      <Field label="งวดที่ชำระ"><TextInput type="month" value={f.period} onChange={e=>{setF({...f,period:e.target.value});setError("");}} /></Field>
-      <Field label="วันที่รับเงิน"><DateInput value={f.date} max={todayISO()} onChange={e=>setF({...f,date:e.target.value})} /></Field>
-      <Field label="จำนวนเงิน (บาท)"><TextInput type="number" value={f.amount} onChange={e=>setF({...f,amount:e.target.value})} /></Field>
-      <Field label="วิธีชำระ"><Select value={f.method} onChange={e=>setF({...f,method:e.target.value,bankAccount:e.target.value==="cash"?"":f.bankAccount})}><option value="cash">เงินสด</option><option value="bank">ธนาคาร / โอนเงิน</option></Select></Field>
-      {f.method === "bank" && <Field label="บัญชีธนาคาร"><Select value={f.bankAccount} onChange={e=>setF({...f,bankAccount:e.target.value})}><option value="">— เลือกบัญชี —</option>{(settings.bankAccounts||[]).map((b,i)=><option key={i} value={`${b.bankName} ${b.accountNo}`}>{b.bankName} · {b.accountNo}</option>)}</Select></Field>}
-      {error && <p className="text-xs text-rose-600 mb-3">{error}</p>}
-      <div className="flex justify-end gap-2"><Btn variant="ghost" onClick={onClose}>ยกเลิก</Btn><Btn onClick={save}><Check size={15}/> บันทึกการชำระ</Btn></div>
+
+      {member && overdueMonths.length === 0 && (
+        <p className="text-sm text-emerald-700 bg-emerald-50 rounded-md px-3 py-2 mb-3">สมาชิกคนนี้ชำระเงินสงเคราะห์ครบถึงเดือนปัจจุบันแล้ว</p>
+      )}
+
+      {member && overdueMonths.length > 0 && (
+        <>
+          <Field label={`เลือกงวดที่จะชำระ (ค้างอยู่ ${overdueMonths.length} เดือน — ติ๊กได้หลายงวดเพื่อจ่ายทีเดียว)`}>
+            <div className="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-48 overflow-y-auto">
+              <label className="flex items-center gap-2 px-3 py-2 text-sm bg-slate-50 cursor-pointer">
+                <input type="checkbox" checked={selected.size === overdueMonths.length} onChange={toggleAll} />
+                <span className="font-medium">เลือกทั้งหมด</span>
+              </label>
+              {overdueMonths.map(p => (
+                <label key={p} className="flex items-center justify-between gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-slate-50">
+                  <span className="flex items-center gap-2"><input type="checkbox" checked={selected.has(p)} onChange={()=>toggle(p)} /> {thaiMonthLabel(p)}</span>
+                  <span className="text-slate-400">฿{money(rate)}</span>
+                </label>
+              ))}
+            </div>
+          </Field>
+
+          <Field label="วันที่รับเงิน"><DateInput value={date} max={todayISO()} onChange={e=>setDate(e.target.value)} /></Field>
+          <Field label="วิธีชำระ">
+            <Select value={method} onChange={e=>setMethod(e.target.value)}>
+              <option value="cash">เงินสด</option>
+              <option value="bank">ธนาคาร / โอนเงิน</option>
+            </Select>
+          </Field>
+          {method === "bank" && (
+            <>
+              <Field label="บัญชีธนาคาร">
+                <Select value={bankAccount} onChange={e=>setBankAccount(e.target.value)}>
+                  <option value="">— เลือกบัญชี —</option>
+                  {(settings.bankAccounts||[]).map((b,i)=><option key={i} value={`${b.bankName} ${b.accountNo}`}>{b.bankName} · {b.accountNo}</option>)}
+                </Select>
+              </Field>
+              <Field label="แนบภาพสลิปการโอนเงิน (ถ้ามี)">
+                <div className="flex items-center gap-3">
+                  <label className="inline-flex items-center gap-1.5 text-sm px-3 py-2 rounded-md border border-slate-300 bg-white hover:bg-slate-50 cursor-pointer text-slate-700">
+                    <Paperclip size={14}/> {slipImage ? "เปลี่ยนภาพสลิป" : "เลือกภาพสลิป"}
+                    <input type="file" accept="image/*" className="hidden" onChange={handleSlipFile} />
+                  </label>
+                  {uploading && <span className="text-xs text-slate-400">กำลังบีบอัดภาพ…</span>}
+                  {slipImage && !uploading && (
+                    <div className="flex items-center gap-2">
+                      <img src={slipImage} alt="ตัวอย่างสลิป" className="h-12 w-12 object-cover rounded border border-slate-200" />
+                      <button type="button" onClick={()=>setSlipImage("")} className="text-xs text-rose-600 hover:underline">ลบภาพ</button>
+                    </div>
+                  )}
+                </div>
+              </Field>
+            </>
+          )}
+
+          <div className="bg-slate-50 rounded-md px-4 py-3 flex items-center justify-between text-sm mb-1">
+            <span className="text-slate-500">เลือกแล้ว {selectedPeriods.length} เดือน</span>
+            <span className="font-semibold text-slate-800">รวม ฿{money(totalAmount)}</span>
+          </div>
+        </>
+      )}
+
+      {error && <p className="text-xs text-rose-600 mb-3 mt-2">{error}</p>}
+      <div className="flex justify-end gap-2 mt-3">
+        <Btn variant="ghost" onClick={onClose}>ยกเลิก</Btn>
+        <Btn onClick={save} disabled={!member || overdueMonths.length===0}><Check size={15}/> บันทึกการชำระ{selectedPeriods.length>1 ? ` (${selectedPeriods.length} เดือน)` : ""}</Btn>
+      </div>
     </Modal>
   );
 }
@@ -1276,18 +1413,171 @@ function BankTransactionModal({ settings, cashBalance, bankBalance, onClose, onS
 }
 
 function DuesView({ members, vouchers, settings, onRecordPayment }) {
+  const [mode, setMode] = useState("single"); // "single" | "cumulative"
   const [period, setPeriod] = useState(currentMonth());
+  const [asOf, setAsOf] = useState(currentMonth());
+  const [search, setSearch] = useState("");
   const [paymentFor, setPaymentFor] = useState(null);
-  const [printMembers, setPrintMembers] = useState(null);
+  const [printEntries, setPrintEntries] = useState(null);
+
+  const rateOf = (m) => m.monthlyRate || settings.monthlyRate || 0;
+
   const paidIds = new Set(vouchers.filter(v => !v.cancelled && v.category === "เงินสงเคราะห์รายเดือน" && v.paymentPeriod === period && v.memberId).map(v => v.memberId));
   const dueMembers = members.filter(m => m.status === "active" && m.joinDate?.slice(0,7) <= period);
-  const overdue = dueMembers.filter(m => !paidIds.has(m.id));
-  if (printMembers) return <DebtLetterPrint members={printMembers} period={period} settings={settings} onClose={()=>setPrintMembers(null)} />;
-  return <div className="p-8 max-w-6xl"><div className="flex items-center justify-between mb-5"><div><h1 className="text-xl font-semibold text-slate-800">สมาชิกค้างชำระ</h1><p className="text-sm text-slate-500 mt-1">ตรวจการชำระเงินสงเคราะห์รายเดือน และออกหนังสือแจ้งเตือน</p></div><Btn variant="ghost" disabled={!overdue.length} onClick={()=>setPrintMembers(overdue)}><Printer size={15}/> พิมพ์จดหมายทั้งหมด ({overdue.length})</Btn></div><div className="bg-white border border-slate-200 rounded-lg p-4 mb-5 flex items-end justify-between"><div className="w-56"><Field label="เลือกงวด"><TextInput type="month" value={period} onChange={e=>setPeriod(e.target.value)} /></Field></div><div className={`text-sm font-semibold ${overdue.length?"text-rose-700":"text-emerald-700"}`}>{overdue.length ? `ค้างชำระ ${overdue.length} คน` : "สมาชิกชำระครบแล้ว"}</div></div><div className="bg-white border border-slate-200 rounded-lg overflow-hidden"><table className="w-full text-sm"><thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="text-left px-4 py-3">เลขทะเบียน</th><th className="text-left px-4 py-3">สมาชิก</th><th className="text-left px-4 py-3">หมู่บ้าน</th><th className="text-right px-4 py-3">อัตรา/เดือน</th><th className="text-left px-4 py-3">สถานะ</th><th></th></tr></thead><tbody>{dueMembers.map(m=>{const paid=paidIds.has(m.id);return <tr key={m.id} className="border-t border-slate-100"><td className="px-4 py-3 font-mono text-xs">{m.memberNo}</td><td className="px-4 py-3 font-medium">{m.name}</td><td className="px-4 py-3">{m.village||"-"}</td><td className="px-4 py-3 text-right">฿{money(m.monthlyRate||settings.monthlyRate)}</td><td className="px-4 py-3">{paid?<span className="text-xs font-medium text-emerald-700">ชำระแล้ว</span>:<span className="text-xs font-medium text-rose-700">ค้างชำระ</span>}</td><td className="px-4 py-3 text-right">{!paid&&<><button onClick={()=>setPaymentFor(m)} className="text-xs text-emerald-700 underline mr-3">บันทึกชำระ</button><button onClick={()=>setPrintMembers([m])} className="text-slate-400 hover:text-emerald-700"><Printer size={15}/></button></>}</td></tr>})}{dueMembers.length===0&&<EmptyRow colSpan={6} text="ไม่มีสมาชิกที่ถึงกำหนดชำระในงวดนี้"/>}</tbody></table></div>{paymentFor&&<MonthlyPaymentModal members={members} vouchers={vouchers} settings={settings} initialMember={paymentFor} initialPeriod={period} onClose={()=>setPaymentFor(null)} onSave={(data)=>{onRecordPayment(data);setPaymentFor(null);}} />}</div>;
+  const overdueSingle = dueMembers.filter(m => !paidIds.has(m.id));
+
+  const cumulativeRows = useMemo(() => {
+    return members.filter(m => m.status === "active").map(m => {
+      const overdueMonths = getOverdueMonthsForMember(m, vouchers, asOf);
+      if (overdueMonths.length === 0) return null;
+      return { member: m, overdueMonths, totalAmount: overdueMonths.length * rateOf(m) };
+    }).filter(Boolean).sort((a,b) => b.overdueMonths.length - a.overdueMonths.length);
+  }, [members, vouchers, asOf, settings]);
+
+  const filteredCumulative = cumulativeRows.filter(r => !search || `${r.member.name} ${r.member.memberNo} ${r.member.village||""}`.toLowerCase().includes(search.toLowerCase()));
+
+  if (printEntries) return <DebtLetterPrint entries={printEntries} settings={settings} onClose={()=>setPrintEntries(null)} />;
+
+  return (
+    <div className="p-8 max-w-6xl">
+      <div className="flex items-center justify-between mb-5">
+        <div>
+          <h1 className="text-xl font-semibold text-slate-800">สมาชิกค้างชำระ</h1>
+          <p className="text-sm text-slate-500 mt-1">ตรวจการชำระเงินสงเคราะห์รายเดือน และออกหนังสือแจ้งเตือน</p>
+        </div>
+        {mode === "single" ? (
+          <Btn variant="ghost" disabled={!overdueSingle.length}
+            onClick={()=>setPrintEntries(overdueSingle.map(m=>({ member:m, overdueMonths:[period], totalAmount: rateOf(m) })))}>
+            <Printer size={15}/> พิมพ์จดหมายทั้งหมด ({overdueSingle.length})
+          </Btn>
+        ) : (
+          <Btn variant="ghost" disabled={!filteredCumulative.length}
+            onClick={()=>setPrintEntries(filteredCumulative.map(r=>({ member:r.member, overdueMonths:r.overdueMonths, totalAmount:r.totalAmount })))}>
+            <Printer size={15}/> พิมพ์จดหมายทั้งหมด ({filteredCumulative.length})
+          </Btn>
+        )}
+      </div>
+
+      <div className="flex gap-1 mb-5 border-b border-slate-200">
+        <button onClick={()=>setMode("single")} className={`px-4 py-2 text-sm font-medium border-b-2 ${mode==="single"?"border-emerald-600 text-emerald-700":"border-transparent text-slate-500"}`}>ตรวจตามงวด</button>
+        <button onClick={()=>setMode("cumulative")} className={`px-4 py-2 text-sm font-medium border-b-2 ${mode==="cumulative"?"border-emerald-600 text-emerald-700":"border-transparent text-slate-500"}`}>ยอดค้างสะสม</button>
+      </div>
+
+      {mode === "single" ? (
+        <>
+          <div className="bg-white border border-slate-200 rounded-lg p-4 mb-5 flex items-end justify-between">
+            <div className="w-56"><Field label="เลือกงวด"><TextInput type="month" value={period} onChange={e=>setPeriod(e.target.value)} /></Field></div>
+            <div className={`text-sm font-semibold ${overdueSingle.length?"text-rose-700":"text-emerald-700"}`}>{overdueSingle.length ? `ค้างชำระ ${overdueSingle.length} คน` : "สมาชิกชำระครบแล้ว"}</div>
+          </div>
+          <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-xs text-slate-500"><tr>
+                <th className="text-left px-4 py-3">เลขทะเบียน</th><th className="text-left px-4 py-3">สมาชิก</th><th className="text-left px-4 py-3">หมู่บ้าน</th><th className="text-right px-4 py-3">อัตรา/เดือน</th><th className="text-left px-4 py-3">สถานะ</th><th></th>
+              </tr></thead>
+              <tbody>
+                {dueMembers.map(m=>{
+                  const paid = paidIds.has(m.id);
+                  return (
+                    <tr key={m.id} className="border-t border-slate-100">
+                      <td className="px-4 py-3 font-mono text-xs">{m.memberNo}</td>
+                      <td className="px-4 py-3 font-medium">{m.name}</td>
+                      <td className="px-4 py-3">{m.village||"-"}</td>
+                      <td className="px-4 py-3 text-right">฿{money(rateOf(m))}</td>
+                      <td className="px-4 py-3">{paid ? <span className="text-xs font-medium text-emerald-700">ชำระแล้ว</span> : <span className="text-xs font-medium text-rose-700">ค้างชำระ</span>}</td>
+                      <td className="px-4 py-3 text-right">{!paid && <>
+                        <button onClick={()=>setPaymentFor(m)} className="text-xs text-emerald-700 underline mr-3">บันทึกชำระ</button>
+                        <button onClick={()=>setPrintEntries([{member:m, overdueMonths:[period], totalAmount:rateOf(m)}])} className="text-slate-400 hover:text-emerald-700"><Printer size={15}/></button>
+                      </>}</td>
+                    </tr>
+                  );
+                })}
+                {dueMembers.length===0 && <EmptyRow colSpan={6} text="ไม่มีสมาชิกที่ถึงกำหนดชำระในงวดนี้"/>}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="bg-white border border-slate-200 rounded-lg p-4 mb-5 flex items-end gap-4 flex-wrap">
+            <div className="w-56"><Field label="คำนวณยอดค้างถึงงวด"><TextInput type="month" value={asOf} onChange={e=>setAsOf(e.target.value)} /></Field></div>
+            <div className="flex-1 min-w-[200px]">
+              <Field label="ค้นหาสมาชิก">
+                <div className="relative">
+                  <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"/>
+                  <input className={inputCls + " pl-8"} placeholder="ชื่อ / เลขทะเบียน / หมู่บ้าน" value={search} onChange={e=>setSearch(e.target.value)} />
+                </div>
+              </Field>
+            </div>
+            <div className={`text-sm font-semibold pb-3 ${filteredCumulative.length?"text-rose-700":"text-emerald-700"}`}>{filteredCumulative.length ? `ค้างชำระสะสม ${filteredCumulative.length} คน` : "ไม่มีผู้ค้างชำระ"}</div>
+          </div>
+          <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-xs text-slate-500"><tr>
+                <th className="text-left px-4 py-3">เลขทะเบียน</th><th className="text-left px-4 py-3">สมาชิก</th><th className="text-left px-4 py-3">หมู่บ้าน</th><th className="text-center px-4 py-3">ค้างกี่เดือน</th><th className="text-left px-4 py-3">เดือนที่ค้าง</th><th className="text-right px-4 py-3">ยอดรวม</th><th></th>
+              </tr></thead>
+              <tbody>
+                {filteredCumulative.map(r=>{
+                  return (
+                    <tr key={r.member.id} className="border-t border-slate-100">
+                      <td className="px-4 py-3 font-mono text-xs">{r.member.memberNo}</td>
+                      <td className="px-4 py-3 font-medium">{r.member.name}</td>
+                      <td className="px-4 py-3">{r.member.village||"-"}</td>
+                      <td className="px-4 py-3 text-center"><span className="text-xs font-semibold text-rose-700 bg-rose-50 px-2 py-1 rounded">{r.overdueMonths.length} เดือน</span></td>
+                      <td className="px-4 py-3 text-xs text-slate-500">{r.overdueMonths.map(p=>thaiMonthLabel(p)).join(", ")}</td>
+                      <td className="px-4 py-3 text-right font-medium text-rose-700">฿{money(r.totalAmount)}</td>
+                      <td className="px-4 py-3 text-right whitespace-nowrap">
+                        <button onClick={()=>setPaymentFor(r.member)} className="text-xs text-emerald-700 underline mr-3">บันทึกชำระ</button>
+                        <button onClick={()=>setPrintEntries([{member:r.member, overdueMonths:r.overdueMonths, totalAmount:r.totalAmount}])} className="text-slate-400 hover:text-emerald-700"><Printer size={15}/></button>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {filteredCumulative.length===0 && <EmptyRow colSpan={7} text="ไม่มีสมาชิกค้างชำระสะสม"/>}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-slate-400 mt-3">ยอดค้างสะสมคำนวณจากเดือนที่สมัครสมาชิกจนถึงงวดที่เลือก โดยอิงอัตราเงินสงเคราะห์ปัจจุบันของแต่ละคน หากเคยปรับอัตราระหว่างทาง ยอดในอดีตอาจคลาดเคลื่อนเล็กน้อย</p>
+        </>
+      )}
+
+      {paymentFor && (
+        <MonthlyPaymentModal
+          members={members} vouchers={vouchers} settings={settings}
+          initialMember={paymentFor}
+          onClose={()=>setPaymentFor(null)}
+          onSave={(payments)=>{ onRecordPayment(payments); setPaymentFor(null); }}
+        />
+      )}
+    </div>
+  );
 }
 
-function DebtLetterPrint({ members, period, settings, onClose }) {
-  return <div className="p-8 max-w-3xl mx-auto"><div className="print:hidden flex justify-end mb-4"><Btn variant="ghost" onClick={onClose}><X size={15}/> ปิด</Btn><Btn onClick={()=>window.print()}><Printer size={15}/> พิมพ์</Btn></div>{members.map((m,i)=><div key={m.id} className={`bg-white p-10 min-h-[70vh] ${i<members.length-1?"break-after-page":""}`}><h2 className="text-center font-semibold">{settings.associationName}</h2><p className="text-right text-sm mt-8">วันที่ {toThaiDate(todayISO())}</p><p className="mt-8">เรื่อง แจ้งเตือนการชำระเงินสงเคราะห์ประจำเดือน</p><p className="mt-5">เรียน {m.name} เลขทะเบียนสมาชิก {m.memberNo}</p><p className="mt-5 leading-relaxed">ตามที่ท่านเป็นสมาชิกของ {settings.associationName} ขอแจ้งให้ทราบว่าท่านยังมิได้ชำระเงินสงเคราะห์ประจำเดือน <b>{thaiMonthLabel(period)}</b> จำนวน <b>฿{money(m.monthlyRate||settings.monthlyRate)}</b> จึงขอความกรุณาชำระเงินให้สมาคมโดยเร็ว</p><p className="mt-8">ขอแสดงความนับถือ</p><p className="mt-12">........................................................<br/>ผู้มีอำนาจของสมาคม</p></div>)}</div>;
+function DebtLetterPrint({ entries, settings, onClose }) {
+  return (
+    <div className="p-8 max-w-3xl mx-auto">
+      <div className="print:hidden flex justify-end gap-2 mb-4">
+        <Btn variant="ghost" onClick={onClose}><X size={15}/> ปิด</Btn>
+        <Btn onClick={()=>window.print()}><Printer size={15}/> พิมพ์</Btn>
+      </div>
+      {entries.map((en, i) => {
+        const m = en.member;
+        const monthList = en.overdueMonths.map(p=>thaiMonthLabel(p)).join(", ");
+        return (
+          <div key={m.id} className={`bg-white p-10 min-h-[70vh] ${i < entries.length-1 ? "break-after-page" : ""}`}>
+            <h2 className="text-center font-semibold">{settings.associationName}</h2>
+            <p className="text-right text-sm mt-8">วันที่ {toThaiDate(todayISO())}</p>
+            <p className="mt-8">เรื่อง แจ้งเตือนการชำระเงินสงเคราะห์ประจำเดือน</p>
+            <p className="mt-5">เรียน {m.name} เลขทะเบียนสมาชิก {m.memberNo}</p>
+            <p className="mt-5 leading-relaxed">ตามที่ท่านเป็นสมาชิกของ {settings.associationName} ขอแจ้งให้ทราบว่าท่านยังมิได้ชำระเงินสงเคราะห์ประจำเดือนดังนี้</p>
+            <p className="mt-3 leading-relaxed"><b>{monthList}</b> รวม {en.overdueMonths.length} เดือน เป็นเงินทั้งสิ้น <b>฿{money(en.totalAmount)}</b></p>
+            <p className="mt-5 leading-relaxed">จึงขอความกรุณาชำระเงินให้สมาคมโดยเร็ว</p>
+            <p className="mt-8">ขอแสดงความนับถือ</p>
+            <p className="mt-12">........................................................<br/>ผู้มีอำนาจของสมาคม</p>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function CancelModal({ voucher, onClose, onConfirm }) {
