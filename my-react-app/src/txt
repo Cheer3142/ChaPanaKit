@@ -34,7 +34,10 @@ found 0 vulnerabilities
 cd C:\Users\cheer\OneDrive\Desktop\Cheer\90k\ChaPanaKit\my-react-app
 npm run dev
 
+- Set path global
+setx PATH "%PATH%;C:\Program Files\nodejs"
 
+- เพิ่ม Logo
 import logoImg from "./assets/logoCC.png";
 
 {/* <div className="w-12 h-12 rounded-full bg-emerald-700 text-white flex items-center justify-center mx-auto mb-3 font-serif font-bold">ฌ</div> */}

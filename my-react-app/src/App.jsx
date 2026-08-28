@@ -162,6 +162,12 @@ export default function App() {
   async function persistVouchers(next) { setVouchers(next); await saveKey("vouchers", next); }
   async function persistDeathCalcs(next) { setDeathCalcs(next); await saveKey("death-calcs", next); }
   async function persistSettings(next) { setSettings(next); await saveKey("settings", next); }
+  async function resetAllData() {
+    await persistMembers([]);
+    await persistCoordinators([]);
+    await persistVouchers([]);
+    await persistDeathCalcs([]);
+  }
 
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center bg-stone-50 text-slate-500 text-sm">กำลังโหลดข้อมูล…</div>;
@@ -243,7 +249,7 @@ export default function App() {
         )}
         {view === "reports" && <ReportsView vouchers={vouchers} settings={settings} />}
         {view === "settings" && currentUser.role === "admin" && (
-          <SettingsView settings={settings} setSettings={persistSettings} users={users} setUsers={persistUsers} currentUser={currentUser} />
+          <SettingsView settings={settings} setSettings={persistSettings} users={users} setUsers={persistUsers} currentUser={currentUser} onResetAllData={resetAllData} />
         )}
       </main>
     </div>
@@ -366,6 +372,8 @@ function MembersView({ members, setMembers, coordinators, setCoordinators, setti
   const [editing, setEditing] = useState(null); // member obj or "new" or null
   const [coordEditing, setCoordEditing] = useState(null);
   const [printMode, setPrintMode] = useState(false);
+  const [deletingMember, setDeletingMember] = useState(null);
+  const [viewingIdCard, setViewingIdCard] = useState(null);
 
   const filtered = members.filter(m => {
     if (statusFilter !== "all" && m.status !== statusFilter) return false;
@@ -381,6 +389,10 @@ function MembersView({ members, setMembers, coordinators, setCoordinators, setti
       setMembers([...members, { ...data, id: genId("MEM"), memberNo, history: [{ at: Date.now(), by: currentUser.name, note: "สมัครสมาชิกใหม่" }] }]);
     }
     setEditing(null);
+  }
+  function deleteMember() {
+    setMembers(members.filter(m => m.id !== deletingMember.id));
+    setDeletingMember(null);
   }
   function saveCoordinator(data) {
     if (data.id) setCoordinators(coordinators.map(c => c.id === data.id ? data : c));
@@ -443,7 +455,11 @@ function MembersView({ members, setMembers, coordinators, setCoordinators, setti
                     <td className="px-4 py-3">{coordinators.find(c=>c.id===m.coordinatorId)?.name || "-"}</td>
                     <td className="px-4 py-3">{toThaiDate(m.joinDate)}</td>
                     <td className="px-4 py-3"><Badge status={m.status} /></td>
-                    <td className="px-4 py-3 text-right"><button onClick={()=>setEditing(m)} className="text-slate-400 hover:text-emerald-700"><Pencil size={15}/></button></td>
+                    <td className="px-4 py-3 text-right whitespace-nowrap">
+                      {m.idCardImage && <button onClick={()=>setViewingIdCard(m.idCardImage)} className="text-slate-400 hover:text-emerald-700 mr-3" title="ดูภาพบัตรประชาชน"><IdCard size={15}/></button>}
+                      <button onClick={()=>setEditing(m)} className="text-slate-400 hover:text-emerald-700 mr-3" title="แก้ไข"><Pencil size={15}/></button>
+                      <button onClick={()=>setDeletingMember(m)} className="text-slate-400 hover:text-rose-600" title="ลบสมาชิก"><Trash2 size={15}/></button>
+                    </td>
                   </tr>
                 ))}
                 {filtered.length === 0 && <EmptyRow colSpan={7} text="ไม่พบข้อมูลสมาชิก" />}
@@ -487,6 +503,16 @@ function MembersView({ members, setMembers, coordinators, setCoordinators, setti
       {coordEditing && (
         <CoordinatorFormModal coordinator={coordEditing === "new" ? null : coordEditing} onClose={()=>setCoordEditing(null)} onSave={saveCoordinator} />
       )}
+      {deletingMember && (
+        <ConfirmModal
+          title="ลบสมาชิก"
+          message={`ยืนยันลบสมาชิก "${deletingMember.name}" (${deletingMember.memberNo}) ออกจากระบบ? ประวัติการรับ-จ่ายเงินที่เคยบันทึกไว้จะยังคงอยู่ แต่การลบทะเบียนนี้ไม่สามารถย้อนกลับได้`}
+          onCancel={()=>setDeletingMember(null)}
+          onConfirm={deleteMember}
+          danger
+        />
+      )}
+      {viewingIdCard && <ImageLightbox src={viewingIdCard} onClose={()=>setViewingIdCard(null)} />}
     </div>
   );
 }
@@ -497,10 +523,21 @@ function MemberFormModal({ member, coordinators, settings, onClose, onSave }) {
     coordinatorId: "", joinDate: todayISO(), status: "active",
     monthlyRate: settings.monthlyRate,
     beneficiaryName: "", beneficiaryRelation: "", beneficiaryPhone: "",
-    notes: ""
+    notes: "", idCardImage: ""
   });
   const [errors, setErrors] = useState({});
+  const [uploadingIdCard, setUploadingIdCard] = useState(false);
   function set(k,v){ setF(prev=>({...prev,[k]:v})); }
+  async function handleIdCardFile(ev) {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    setUploadingIdCard(true);
+    try {
+      const dataUrl = await compressImage(file, 900, 0.55);
+      set("idCardImage", dataUrl);
+    } catch (err) { console.error(err); }
+    setUploadingIdCard(false);
+  }
 
   function validate() {
     const e = {};
@@ -525,6 +562,21 @@ function MemberFormModal({ member, coordinators, settings, onClose, onSave }) {
         <Field label="เลขบัตรประชาชน (13 หลัก)" error={errors.idCard}>
           <TextInput invalid={!!errors.idCard} value={f.idCard} maxLength={13} inputMode="numeric"
             onChange={e=>set("idCard", e.target.value.replace(/\D/g,"").slice(0,13))} placeholder="เลข 13 หลัก ไม่ต้องมีขีด" />
+        </Field>
+        <Field label="ภาพบัตรประชาชน (ถ้ามี)">
+          <div className="flex items-center gap-3">
+            <label className="inline-flex items-center gap-1.5 text-sm px-3 py-2 rounded-md border border-slate-300 bg-white hover:bg-slate-50 cursor-pointer text-slate-700">
+              <IdCard size={14}/> {f.idCardImage ? "เปลี่ยนภาพ" : "แนบภาพบัตร"}
+              <input type="file" accept="image/*" className="hidden" onChange={handleIdCardFile} />
+            </label>
+            {uploadingIdCard && <span className="text-xs text-slate-400">กำลังบีบอัดภาพ…</span>}
+            {f.idCardImage && !uploadingIdCard && (
+              <div className="flex items-center gap-2">
+                <img src={f.idCardImage} alt="ตัวอย่างบัตรประชาชน" className="h-10 w-14 object-cover rounded border border-slate-200" />
+                <button type="button" onClick={()=>set("idCardImage","")} className="text-xs text-rose-600 hover:underline">ลบภาพ</button>
+              </div>
+            )}
+          </div>
         </Field>
         <Field label="ที่อยู่"><TextInput value={f.address} onChange={e=>set("address",e.target.value)} /></Field>
         <Field label="หมู่บ้าน / กองทุน" error={errors.village}><TextInput invalid={!!errors.village} value={f.village} onChange={e=>set("village",e.target.value)} /></Field>
@@ -900,19 +952,24 @@ function FinancialView({ vouchers, setVouchers, members, settings, currentUser }
   const [cancelling, setCancelling] = useState(null);
   const [printing, setPrinting] = useState(null);
   const [viewingSlip, setViewingSlip] = useState(null);
+  const [showQr, setShowQr] = useState(false);
 
   const list = vouchers.filter(v => v.type === tab).sort((a,b)=>b.createdAt-a.createdAt);
 
   function addVoucher(data) {
     const prefix = tab === "receipt" ? "RV" : "PV";
     const seq = vouchers.filter(v=>v.type===tab).length + 1;
-    const voucherNo = `${prefix}-${todayISO().replace(/-/g,"")}-${padNo(seq,3)}`;
-    setVouchers([...vouchers, { ...data, id: genId(prefix), type: tab, voucherNo, cancelled: false, createdAt: Date.now(), createdBy: currentUser.name }]);
+    const voucherNo = `${prefix}-${data.date.replace(/-/g,"")}-${padNo(seq,3)}`;
+    const verified = data.method === "cash" ? true : false;
+    setVouchers([...vouchers, { ...data, id: genId(prefix), type: tab, voucherNo, cancelled: false, verified, createdAt: Date.now(), createdBy: currentUser.name }]);
     setShowForm(false);
   }
   function cancelVoucher(id, reason) {
     setVouchers(vouchers.map(v => v.id === id ? { ...v, cancelled: true, cancelReason: reason, cancelledBy: currentUser.name, cancelledAt: Date.now() } : v));
     setCancelling(null);
+  }
+  function markVerified(id) {
+    setVouchers(vouchers.map(v => v.id === id ? { ...v, verified: true, verifiedBy: currentUser.name, verifiedAt: Date.now() } : v));
   }
 
   if (printing) return <VoucherPrint voucher={printing} settings={settings} onClose={()=>setPrinting(null)} />;
@@ -921,7 +978,10 @@ function FinancialView({ vouchers, setVouchers, members, settings, currentUser }
     <div className="p-8 max-w-6xl">
       <div className="flex items-center justify-between mb-5">
         <h1 className="text-xl font-semibold text-slate-800">งานการเงิน</h1>
-        <Btn onClick={()=>setShowForm(true)}><Plus size={15}/> {tab==="receipt" ? "บันทึกใบสำคัญรับเงิน" : "บันทึกใบสำคัญจ่ายเงิน"}</Btn>
+        <div className="flex items-center gap-2">
+          {settings.promptPayQrImage && <Btn variant="ghost" onClick={()=>setShowQr(true)}><QrCode size={15}/> แสดง QR รับเงิน</Btn>}
+          <Btn onClick={()=>setShowForm(true)}><Plus size={15}/> {tab==="receipt" ? "บันทึกใบสำคัญรับเงิน" : "บันทึกใบสำคัญจ่ายเงิน"}</Btn>
+        </div>
       </div>
       <div className="flex gap-1 mb-5 border-b border-slate-200">
         <button onClick={()=>setTab("receipt")} className={`px-4 py-2 text-sm font-medium border-b-2 ${tab==="receipt"?"border-emerald-600 text-emerald-700":"border-transparent text-slate-500"}`}>ใบสำคัญรับเงิน</button>
@@ -936,6 +996,7 @@ function FinancialView({ vouchers, setVouchers, members, settings, currentUser }
             <th className="text-left px-4 py-3 font-medium">รายการ</th>
             <th className="text-left px-4 py-3 font-medium">วิธีชำระ</th>
             <th className="text-right px-4 py-3 font-medium">จำนวนเงิน</th>
+            <th className="text-left px-4 py-3 font-medium">สถานะรับเงิน</th>
             <th className="px-4 py-3"></th>
           </tr></thead>
           <tbody>
@@ -946,14 +1007,26 @@ function FinancialView({ vouchers, setVouchers, members, settings, currentUser }
                 <td className="px-4 py-3">{v.category}{v.partyName ? ` — ${v.partyName}` : ""}{v.cancelled && <span className="text-rose-500 text-xs ml-2">(ยกเลิกแล้ว)</span>}</td>
                 <td className="px-4 py-3">{v.method === "cash" ? "เงินสด" : `ธนาคาร (${v.bankAccount || "-"})`}</td>
                 <td className="px-4 py-3 text-right">฿{money(v.amount)}</td>
+                <td className="px-4 py-3">
+                  {v.method === "cash" ? (
+                    <span className="text-xs text-slate-400">—</span>
+                  ) : v.verified ? (
+                    <span className="text-xs font-medium text-emerald-700 bg-emerald-50 px-2 py-1 rounded">ยืนยันรับเงินแล้ว</span>
+                  ) : (
+                    <span className="text-xs font-medium text-amber-700 bg-amber-50 px-2 py-1 rounded">รอตรวจสอบสลิป</span>
+                  )}
+                </td>
                 <td className="px-4 py-3 text-right whitespace-nowrap">
                   {v.slipImage && <button onClick={()=>setViewingSlip(v.slipImage)} className="text-slate-400 hover:text-emerald-700 mr-3" title="ดูภาพสลิป"><ImageIcon size={15}/></button>}
+                  {currentUser.role === "admin" && v.method === "bank" && !v.verified && !v.cancelled && (
+                    <button onClick={()=>markVerified(v.id)} className="text-slate-400 hover:text-emerald-700 mr-3" title="ยืนยันว่าได้รับเงินแล้ว"><Check size={15}/></button>
+                  )}
                   <button onClick={()=>setPrinting(v)} className="text-slate-400 hover:text-emerald-700 mr-3" title="พิมพ์"><Printer size={15}/></button>
                   {!v.cancelled && <button onClick={()=>setCancelling(v)} className="text-slate-400 hover:text-rose-600" title="ยกเลิก"><Ban size={15}/></button>}
                 </td>
               </tr>
             ))}
-            {list.length===0 && <EmptyRow colSpan={6} text="ยังไม่มีรายการ" />}
+            {list.length===0 && <EmptyRow colSpan={7} text="ยังไม่มีรายการ" />}
           </tbody>
         </table>
       </div>
@@ -964,6 +1037,13 @@ function FinancialView({ vouchers, setVouchers, members, settings, currentUser }
       )}
       {cancelling && <CancelModal voucher={cancelling} onClose={()=>setCancelling(null)} onConfirm={(reason)=>cancelVoucher(cancelling.id, reason)} />}
       {viewingSlip && <ImageLightbox src={viewingSlip} onClose={()=>setViewingSlip(null)} />}
+      {showQr && (
+        <Modal title="QR พร้อมเพย์สำหรับรับเงิน" onClose={()=>setShowQr(false)}>
+          <img src={settings.promptPayQrImage} alt="PromptPay QR" className="w-full rounded-md border border-slate-200" />
+          {settings.promptPayLabel && <p className="text-center text-sm text-slate-600 mt-3">{settings.promptPayLabel}</p>}
+          <p className="text-xs text-slate-400 mt-3 text-center">ให้สมาชิกสแกนจ่ายเงิน จากนั้นแนบภาพสลิปตอนบันทึกใบสำคัญรับเงิน เพื่อรอผู้ดูแลระบบตรวจสอบและยืนยัน</p>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -998,7 +1078,7 @@ function VoucherFormModal({ type, members, settings, categories, onClose, onSave
 
   return (
     <Modal title={type === "receipt" ? "บันทึกใบสำคัญรับเงิน" : "บันทึกใบสำคัญจ่ายเงิน"} onClose={onClose}>
-      <Field label="วันที่" error={errors.date}><TextInput invalid={!!errors.date} type="date" value={f.date} onChange={e=>setF({...f,date:e.target.value})} /></Field>
+      <Field label="วันที่ (สามารถระบุย้อนหลังได้)" error={errors.date}><TextInput invalid={!!errors.date} type="date" value={f.date} max={todayISO()} onChange={e=>setF({...f,date:e.target.value})} /></Field>
       <Field label="ประเภทรายการ">
         <Select value={f.category} onChange={e=>setF({...f,category:e.target.value})}>
           {categories.map(c => <option key={c}>{c}</option>)}
@@ -1317,14 +1397,31 @@ function ReportTable({ rows }) {
 
 /* ============================== settings ============================== */
 
-function SettingsView({ settings, setSettings, users, setUsers, currentUser }) {
+function SettingsView({ settings, setSettings, users, setUsers, currentUser, onResetAllData }) {
   const [f, setF] = useState(settings);
   const [newBank, setNewBank] = useState({ bankName: "", accountNo: "", accountName: "" });
   const [userForm, setUserForm] = useState(null);
   const [deletingUser, setDeletingUser] = useState(null);
   const [deleteError, setDeleteError] = useState("");
+  const [qrUploading, setQrUploading] = useState(false);
+  const [resetModalOpen, setResetModalOpen] = useState(false);
 
   function saveGeneral() { setSettings(f); }
+  async function handleQrFile(ev) {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    setQrUploading(true);
+    try {
+      const dataUrl = await compressImage(file, 700, 0.8);
+      const next = { ...f, promptPayQrImage: dataUrl };
+      setF(next); setSettings(next);
+    } catch (err) { console.error(err); }
+    setQrUploading(false);
+  }
+  function removeQr() {
+    const next = { ...f, promptPayQrImage: "" };
+    setF(next); setSettings(next);
+  }
   function addBank() {
     if (!newBank.bankName || !newBank.accountNo) return;
     const next = { ...f, bankAccounts: [...(f.bankAccounts||[]), newBank] };
@@ -1384,7 +1481,33 @@ function SettingsView({ settings, setSettings, users, setUsers, currentUser }) {
         </div>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-lg p-6">
+      <div className="bg-white border border-slate-200 rounded-lg p-6 mb-6">
+        <h2 className="text-sm font-semibold text-slate-700 mb-2 flex items-center gap-2"><QrCode size={16}/> QR พร้อมเพย์สำหรับรับเงิน</h2>
+        <p className="text-xs text-slate-500 mb-4">อัปโหลดภาพ QR พร้อมเพย์ที่สร้างจากแอปธนาคารของสมาคม (หน้าที่มักเรียกว่า "ขอ QR รับเงิน" หรือ "PromptPay QR") ระบบจะใช้แสดงให้สมาชิกสแกนจ่ายเงินเท่านั้น ไม่ได้เชื่อมต่อกับธนาคารโดยตรง — ดูคำแนะนำเรื่องการตรวจสอบยอดเงินด้านล่าง</p>
+        <div className="flex items-center gap-4">
+          {f.promptPayQrImage ? (
+            <img src={f.promptPayQrImage} alt="PromptPay QR" className="w-28 h-28 object-contain border border-slate-200 rounded-md" />
+          ) : (
+            <div className="w-28 h-28 flex items-center justify-center border border-dashed border-slate-300 rounded-md text-slate-300"><QrCode size={28}/></div>
+          )}
+          <div className="flex flex-col gap-2">
+            <label className="inline-flex items-center gap-1.5 text-sm px-3 py-2 rounded-md border border-slate-300 bg-white hover:bg-slate-50 cursor-pointer text-slate-700 w-fit">
+              <Paperclip size={14}/> {f.promptPayQrImage ? "เปลี่ยนภาพ QR" : "อัปโหลดภาพ QR"}
+              <input type="file" accept="image/*" className="hidden" onChange={handleQrFile} />
+            </label>
+            {qrUploading && <span className="text-xs text-slate-400">กำลังบีบอัดภาพ…</span>}
+            {f.promptPayQrImage && <button onClick={removeQr} className="text-xs text-rose-600 hover:underline text-left">ลบภาพ QR</button>}
+          </div>
+        </div>
+        <Field label="ข้อความกำกับ QR (ถ้ามี เช่น ชื่อบัญชีพร้อมเพย์)">
+          <TextInput value={f.promptPayLabel||""} onChange={e=>{ const next={...f, promptPayLabel:e.target.value}; setF(next); setSettings(next); }} placeholder="เช่น พร้อมเพย์ 08x-xxx-xxxx สมาคมฌาปนกิจสงเคราะห์..." />
+        </Field>
+        <div className="bg-slate-50 border border-slate-200 rounded-md p-3 text-xs text-slate-600 leading-relaxed mt-2">
+          <b>เรื่องการตรวจสอบว่าเงินโอนเข้าจริงหรือไม่:</b> การสร้าง QR พร้อมเพย์เพื่อรับเงินทำได้เองโดยไม่ต้องขออนุญาตจาก ธปท. แต่การ "เช็คอัตโนมัติ" ว่ามีเงินเข้าบัญชีจริง ต้องเชื่อมต่อ API ของธนาคารหรือบริการตรวจสลิปของเอกชน (เช่น SlipOK, EasySlip) ซึ่งต้องสมัครใช้บริการกับผู้ให้บริการนั้น ๆ (ไม่ใช่การขอ ธปท. โดยตรง) และต้องมีเซิร์ฟเวอร์กลางเก็บ API key อย่างปลอดภัย ซึ่งอยู่นอกเหนือขอบเขตของแอปที่รันในเบราว์เซอร์ล้วนแบบนี้ ในเวอร์ชันนี้จึงใช้วิธี "แนบภาพสลิป + ผู้ดูแลระบบตรวจสอบแล้วกดยืนยัน" แทน (ดูได้ที่หน้างานการเงิน) ซึ่งปลอดภัยและเพียงพอสำหรับสมาคมขนาดนี้ หากสนใจต่อยอดเป็นระบบตรวจสอบอัตโนมัติ แจ้งได้ครับ
+        </div>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-lg p-6 mb-6">
         <div className="flex justify-between items-center mb-4">
           <h2 className="text-sm font-semibold text-slate-700">ผู้ใช้งานระบบ</h2>
           <Btn variant="ghost" onClick={()=>setUserForm("new")}><Plus size={15}/> เพิ่มผู้ใช้งาน</Btn>
@@ -1416,6 +1539,12 @@ function SettingsView({ settings, setSettings, users, setUsers, currentUser }) {
         </table>
       </div>
 
+      <div className="bg-white border border-rose-200 rounded-lg p-6">
+        <h2 className="text-sm font-semibold text-rose-700 flex items-center gap-2 mb-2"><ShieldAlert size={16}/> โซนอันตราย</h2>
+        <p className="text-xs text-slate-500 mb-4">ล้างข้อมูลสมาชิก ผู้ประสานงาน ใบสำคัญรับ-จ่ายเงิน และประวัติการคำนวณเงินสงเคราะห์ทั้งหมดออกจากระบบ (ไม่รวมผู้ใช้งานระบบและการตั้งค่า) การกระทำนี้ไม่สามารถย้อนกลับได้ และต้องยืนยันด้วยรหัสผ่านผู้ดูแลระบบของคุณ</p>
+        <Btn variant="danger" onClick={()=>setResetModalOpen(true)}><Trash2 size={15}/> ล้างข้อมูลทั้งหมด</Btn>
+      </div>
+
       {userForm && <UserFormModal onClose={()=>setUserForm(null)} onSave={saveUser} existingUsernames={users.map(u=>u.username)} />}
       {deletingUser && (
         <ConfirmModal
@@ -1426,7 +1555,36 @@ function SettingsView({ settings, setSettings, users, setUsers, currentUser }) {
           danger
         />
       )}
+      {resetModalOpen && (
+        <ResetDataModal currentUser={currentUser} onClose={()=>setResetModalOpen(false)} onConfirm={async ()=>{ await onResetAllData(); setResetModalOpen(false); }} />
+      )}
     </div>
+  );
+}
+
+function ResetDataModal({ currentUser, onClose, onConfirm }) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  async function handleConfirm() {
+    if (password !== currentUser.password) { setError("รหัสผ่านไม่ถูกต้อง"); return; }
+    setConfirming(true);
+    await onConfirm();
+  }
+  return (
+    <Modal title="ยืนยันการล้างข้อมูลทั้งหมด" onClose={onClose}>
+      <div className="bg-rose-50 border border-rose-200 text-rose-800 text-sm rounded-md p-3 mb-4 flex gap-2">
+        <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+        <span>ข้อมูลสมาชิก ใบสำคัญรับ-จ่ายเงิน และประวัติการคำนวณเงินสงเคราะห์ทั้งหมดจะถูกลบถาวร ไม่สามารถกู้คืนได้</span>
+      </div>
+      <Field label="ใส่รหัสผ่านผู้ดูแลระบบของคุณเพื่อยืนยัน" error={error}>
+        <TextInput invalid={!!error} type="password" value={password} onChange={e=>{ setPassword(e.target.value); setError(""); }} autoFocus />
+      </Field>
+      <div className="flex justify-end gap-2 mt-4">
+        <Btn variant="ghost" onClick={onClose}>ยกเลิก</Btn>
+        <Btn variant="danger" onClick={handleConfirm} disabled={confirming}><Trash2 size={15}/> ยืนยันล้างข้อมูลทั้งหมด</Btn>
+      </div>
+    </Modal>
   );
 }
 
