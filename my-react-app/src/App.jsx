@@ -45,6 +45,22 @@ function todayISO() { return new Date().toISOString().slice(0, 10); }
 function money(n) { return Number(n || 0).toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function genId(prefix) { return `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
 function padNo(n, len = 4) { return String(n).padStart(len, "0"); }
+function fileDateStamp() { return new Date().toISOString().slice(0, 10); }
+function downloadFile(filename, content, type) {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+function csvValue(value) {
+  let text = value === null || value === undefined ? "" : String(value);
+  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text.replaceAll('"', '""')}"`;
+}
+function downloadCsv(filename, columns, rows) {
+  const csv = [columns.map(c => csvValue(c.label)).join(","), ...rows.map(row => columns.map(c => csvValue(c.value(row))).join(","))].join("\r\n");
+  downloadFile(filename, `\uFEFF${csv}`, "text/csv;charset=utf-8");
+}
 
 async function loadKey(key, fallback) {
   try {
@@ -168,6 +184,15 @@ export default function App() {
     await persistVouchers([]);
     await persistDeathCalcs([]);
   }
+  async function restoreBackup(backup) {
+    await persistUsers(backup.users);
+    await persistMembers(backup.members);
+    await persistCoordinators(backup.coordinators);
+    await persistVouchers(backup.vouchers);
+    await persistDeathCalcs(backup.deathCalcs);
+    await persistSettings(backup.settings);
+    setCurrentUser(null);
+  }
 
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center bg-stone-50 text-slate-500 text-sm">กำลังโหลดข้อมูล…</div>;
@@ -249,7 +274,11 @@ export default function App() {
         )}
         {view === "reports" && <ReportsView vouchers={vouchers} settings={settings} />}
         {view === "settings" && currentUser.role === "admin" && (
-          <SettingsView settings={settings} setSettings={persistSettings} users={users} setUsers={persistUsers} currentUser={currentUser} onResetAllData={resetAllData} />
+          <SettingsView
+            settings={settings} setSettings={persistSettings} users={users} setUsers={persistUsers}
+            members={members} coordinators={coordinators} vouchers={vouchers} deathCalcs={deathCalcs}
+            currentUser={currentUser} onResetAllData={resetAllData} onRestoreBackup={restoreBackup}
+          />
         )}
       </main>
     </div>
@@ -1397,7 +1426,7 @@ function ReportTable({ rows }) {
 
 /* ============================== settings ============================== */
 
-function SettingsView({ settings, setSettings, users, setUsers, currentUser, onResetAllData }) {
+function SettingsView({ settings, setSettings, users, setUsers, members, coordinators, vouchers, deathCalcs, currentUser, onResetAllData, onRestoreBackup }) {
   const [f, setF] = useState(settings);
   const [newBank, setNewBank] = useState({ bankName: "", accountNo: "", accountName: "" });
   const [userForm, setUserForm] = useState(null);
@@ -1405,6 +1434,8 @@ function SettingsView({ settings, setSettings, users, setUsers, currentUser, onR
   const [deleteError, setDeleteError] = useState("");
   const [qrUploading, setQrUploading] = useState(false);
   const [resetModalOpen, setResetModalOpen] = useState(false);
+  const [backupToRestore, setBackupToRestore] = useState(null);
+  const [backupError, setBackupError] = useState("");
 
   function saveGeneral() { setSettings(f); }
   async function handleQrFile(ev) {
@@ -1448,6 +1479,59 @@ function SettingsView({ settings, setSettings, users, setUsers, currentUser, onR
     setUsers(users.filter(x=>x.id!==deletingUser.id));
     setDeletingUser(null);
   }
+  function exportBackup() {
+    const backup = {
+      format: "ChaPanaKit-backup", version: 1, exportedAt: new Date().toISOString(),
+      users, members, coordinators, vouchers, deathCalcs, settings,
+    };
+    downloadFile(`ChaPanaKit-backup-${fileDateStamp()}.json`, JSON.stringify(backup, null, 2), "application/json");
+  }
+  async function handleBackupFile(ev) {
+    const file = ev.target.files?.[0];
+    ev.target.value = "";
+    if (!file) return;
+    setBackupError("");
+    try {
+      const parsed = JSON.parse(await file.text());
+      const valid = parsed?.format === "ChaPanaKit-backup" && parsed.version === 1
+        && Array.isArray(parsed.users) && Array.isArray(parsed.members) && Array.isArray(parsed.coordinators)
+        && Array.isArray(parsed.vouchers) && Array.isArray(parsed.deathCalcs)
+        && parsed.settings && typeof parsed.settings === "object" && !Array.isArray(parsed.settings);
+      if (!valid) throw new Error("invalid-backup");
+      setBackupToRestore(parsed);
+    } catch {
+      setBackupError("ไฟล์นี้ไม่ใช่ไฟล์สำรอง ChaPanaKit ที่รองรับ หรือไฟล์เสียหาย");
+    }
+  }
+  function exportMembersCsv() {
+    downloadCsv(`ChaPanaKit-members-${fileDateStamp()}.csv`, [
+      { label:"เลขทะเบียน", value:m=>m.memberNo }, { label:"ชื่อ-สกุล", value:m=>m.name }, { label:"เลขบัตรประชาชน", value:m=>m.idCard },
+      { label:"ที่อยู่", value:m=>m.address }, { label:"หมู่บ้าน/กองทุน", value:m=>m.village }, { label:"โทรศัพท์", value:m=>m.phone },
+      { label:"วันที่สมัคร", value:m=>m.joinDate }, { label:"สถานะ", value:m=>STATUS_LABEL[m.status] || m.status }, { label:"อัตรารายเดือน", value:m=>m.monthlyRate },
+      { label:"ผู้รับผลประโยชน์", value:m=>m.beneficiaryName }, { label:"ความสัมพันธ์", value:m=>m.beneficiaryRelation }, { label:"โทรศัพท์ผู้รับผลประโยชน์", value:m=>m.beneficiaryPhone }, { label:"หมายเหตุ", value:m=>m.notes },
+    ], members);
+  }
+  function exportVouchersCsv() {
+    downloadCsv(`ChaPanaKit-vouchers-${fileDateStamp()}.csv`, [
+      { label:"เลขที่ใบสำคัญ", value:v=>v.voucherNo }, { label:"วันที่", value:v=>v.date }, { label:"ประเภท", value:v=>v.type === "receipt" ? "รับเงิน" : "จ่ายเงิน" },
+      { label:"หมวด", value:v=>v.category }, { label:"คู่รายการ", value:v=>v.partyName }, { label:"จำนวนเงิน", value:v=>v.amount },
+      { label:"วิธีชำระ", value:v=>v.method === "cash" ? "เงินสด" : "ธนาคาร" }, { label:"บัญชีธนาคาร", value:v=>v.bankAccount }, { label:"หมายเหตุ", value:v=>v.note },
+      { label:"สถานะ", value:v=>v.cancelled ? "ยกเลิก" : (v.verified ? "ยืนยันแล้ว" : "รอยืนยัน") }, { label:"เหตุผลยกเลิก", value:v=>v.cancelReason }, { label:"ผู้บันทึก", value:v=>v.createdBy },
+    ], vouchers);
+  }
+  function exportCoordinatorsCsv() {
+    downloadCsv(`ChaPanaKit-coordinators-${fileDateStamp()}.csv`, [
+      { label:"ชื่อ-สกุล", value:c=>c.name }, { label:"หมู่บ้าน/กองทุน", value:c=>c.village }, { label:"โทรศัพท์", value:c=>c.phone },
+    ], coordinators);
+  }
+  function exportDeathCalcsCsv() {
+    downloadCsv(`ChaPanaKit-death-calculations-${fileDateStamp()}.csv`, [
+      { label:"เลขอ้างอิง", value:d=>d.id }, { label:"เลขทะเบียนสมาชิก", value:d=>d.memberNo }, { label:"ชื่อสมาชิก", value:d=>d.memberName },
+      { label:"วันที่เสียชีวิต", value:d=>d.deathDate }, { label:"วันที่คำนวณ", value:d=>d.calcDate }, { label:"สมาชิกที่ใช้งาน", value:d=>d.activeCount },
+      { label:"อัตราต่อคน", value:d=>d.ratePerMember }, { label:"ยอดรวม", value:d=>d.totalAmount }, { label:"หักค่าใช้จ่าย", value:d=>d.deductions }, { label:"ยอดสุทธิ", value:d=>d.netAmount },
+      { label:"ผู้รับผลประโยชน์", value:d=>d.beneficiaryName },
+    ], deathCalcs);
+  }
 
   return (
     <div className="p-8 max-w-4xl">
@@ -1458,6 +1542,28 @@ function SettingsView({ settings, setSettings, users, setUsers, currentUser, onR
         <Field label="ชื่อสมาคม"><TextInput value={f.associationName} onChange={e=>setF({...f,associationName:e.target.value})} /></Field>
         <Field label="อัตราเงินสงเคราะห์ตั้งต้น (บาท/เดือน)"><TextInput type="number" value={f.monthlyRate} onChange={e=>setF({...f,monthlyRate:e.target.value})} /></Field>
         <Btn onClick={saveGeneral}><Check size={15}/> บันทึก</Btn>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-lg p-6 mb-6">
+        <h2 className="text-sm font-semibold text-slate-700 mb-2">สำรองและส่งออกข้อมูล</h2>
+        <p className="text-xs text-slate-500 mb-4">ไฟล์สำรอง JSON รวมข้อมูลทั้งหมด รวมภาพแนบและบัญชีผู้ใช้ จึงควรเก็บไว้ในที่ปลอดภัย</p>
+        <div className="flex flex-wrap gap-2 mb-4">
+          <Btn onClick={exportBackup}><FileText size={15}/> สำรองข้อมูลทั้งหมด (JSON)</Btn>
+          <label className="inline-flex items-center gap-1.5 text-sm font-medium px-3.5 py-2 rounded-md transition bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 cursor-pointer">
+            <FileText size={15}/> กู้คืนจากไฟล์สำรอง
+            <input type="file" accept="application/json,.json" className="hidden" onChange={handleBackupFile} />
+          </label>
+        </div>
+        {backupError && <p className="text-xs text-rose-600 mb-4">{backupError}</p>}
+        <div className="border-t border-slate-100 pt-4">
+          <p className="text-xs font-semibold text-slate-600 mb-2">ส่งออก CSV (เปิดด้วย Excel ได้)</p>
+          <div className="flex flex-wrap gap-2">
+            <Btn variant="ghost" onClick={exportMembersCsv}>สมาชิก</Btn>
+            <Btn variant="ghost" onClick={exportCoordinatorsCsv}>ผู้ประสานงาน</Btn>
+            <Btn variant="ghost" onClick={exportVouchersCsv}>ใบสำคัญรับ-จ่าย</Btn>
+            <Btn variant="ghost" onClick={exportDeathCalcsCsv}>คำนวณเงินสงเคราะห์</Btn>
+          </div>
+        </div>
       </div>
 
       <div className="bg-white border border-slate-200 rounded-lg p-6 mb-6">
@@ -1558,7 +1664,29 @@ function SettingsView({ settings, setSettings, users, setUsers, currentUser, onR
       {resetModalOpen && (
         <ResetDataModal currentUser={currentUser} onClose={()=>setResetModalOpen(false)} onConfirm={async ()=>{ await onResetAllData(); setResetModalOpen(false); }} />
       )}
+      {backupToRestore && (
+        <RestoreBackupModal
+          backup={backupToRestore}
+          onClose={()=>setBackupToRestore(null)}
+          onConfirm={async ()=>{ await onRestoreBackup(backupToRestore); }}
+        />
+      )}
     </div>
+  );
+}
+
+function RestoreBackupModal({ backup, onClose, onConfirm }) {
+  const [restoring, setRestoring] = useState(false);
+  async function restore() { setRestoring(true); await onConfirm(); }
+  return (
+    <Modal title="ยืนยันการกู้คืนข้อมูล" onClose={onClose}>
+      <div className="bg-amber-50 border border-amber-200 text-amber-900 text-sm rounded-md p-3 mb-4 flex gap-2">
+        <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+        <span>ข้อมูลปัจจุบันทั้งหมดจะถูกแทนที่ด้วยข้อมูลจากไฟล์สำรอง และระบบจะออกจากระบบหลังการกู้คืน</span>
+      </div>
+      <p className="text-sm text-slate-600 mb-5">ไฟล์นี้ส่งออกเมื่อ {backup.exportedAt ? new Date(backup.exportedAt).toLocaleString("th-TH") : "ไม่ทราบเวลา"} — สมาชิก {backup.members.length} ราย, ใบสำคัญ {backup.vouchers.length} รายการ</p>
+      <div className="flex justify-end gap-2"><Btn variant="ghost" onClick={onClose}>ยกเลิก</Btn><Btn variant="danger" onClick={restore} disabled={restoring}><Check size={15}/> ยืนยันกู้คืน</Btn></div>
+    </Modal>
   );
 }
 
