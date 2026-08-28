@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useMemo } from "react";
 import logoImg from "./assets/logoCC.png";
+import versionText from "../version.txt?raw";
 import {
   Users, UserPlus, FileText, Wallet, CalendarDays, Settings as SettingsIcon,
-  LogOut, Plus, Printer, X, Trash2, Pencil, Ban, Landmark, ClipboardList,
+  LogOut, Plus, Printer, X, Trash2, Pencil, Ban, ClipboardList,
   LayoutDashboard, Search, Check, AlertTriangle, ChevronLeft, ChevronRight,
   Image as ImageIcon, CalendarRange, Paperclip, ShieldAlert, QrCode, IdCard
 } from "lucide-react";
@@ -11,6 +12,7 @@ import {
 
 const THAI_MONTHS = ["ม.ค.","ก.พ.","มี.ค.","เม.ย.","พ.ค.","มิ.ย.","ก.ค.","ส.ค.","ก.ย.","ต.ค.","พ.ย.","ธ.ค."];
 const THAI_MONTHS_FULL = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
+const APP_VERSION = versionText.trim().split(/\s+/)[0] || "1.1.0";
 
 function isThaiId13(id) { return /^[0-9]{13}$/.test((id || "").trim()); }
 
@@ -41,10 +43,22 @@ function toThaiDate(iso) {
   if (isNaN(d)) return iso;
   return `${d.getDate()} ${THAI_MONTHS[d.getMonth()]} ${d.getFullYear() + 543}`;
 }
-function todayISO() { return new Date().toISOString().slice(0, 10); }
+function todayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function currentMonth() { return todayISO().slice(0, 7); }
+function thaiMonthLabel(period) {
+  const [year, month] = String(period || "").split("-").map(Number);
+  return year && month ? `${THAI_MONTHS_FULL[month - 1]} ${year + 543}` : "-";
+}
 function money(n) { return Number(n || 0).toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function genId(prefix) { return `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
 function padNo(n, len = 4) { return String(n).padStart(len, "0"); }
+function nextMemberNo(members) {
+  const largest = Math.max(0, ...members.map(m => Number(String(m.memberNo || "").match(/\d+$/)?.[0]) || 0));
+  return "ท-" + padNo(largest + 1);
+}
 function fileDateStamp() { return new Date().toISOString().slice(0, 10); }
 function downloadFile(filename, content, type) {
   const url = URL.createObjectURL(new Blob([content], { type }));
@@ -61,12 +75,26 @@ function downloadCsv(filename, columns, rows) {
   const csv = [columns.map(c => csvValue(c.label)).join(","), ...rows.map(row => columns.map(c => csvValue(c.value(row))).join(","))].join("\r\n");
   downloadFile(filename, `\uFEFF${csv}`, "text/csv;charset=utf-8");
 }
+function balancesAt(vouchers, bankTransactions = [], end = "9999-12-31") {
+  let cash = 0, bank = 0;
+  vouchers.filter(v => !v.cancelled && v.date <= end).forEach(v => {
+    const sign = v.type === "receipt" ? 1 : -1;
+    if (v.method === "cash") cash += sign * Number(v.amount || 0);
+    if (v.method === "bank") bank += sign * Number(v.amount || 0);
+  });
+  bankTransactions.filter(t => !t.cancelled && t.date <= end).forEach(t => {
+    const amount = Number(t.amount || 0);
+    if (t.type === "deposit") { cash -= amount; bank += amount; }
+    if (t.type === "withdraw") { cash += amount; bank -= amount; }
+  });
+  return { cash, bank };
+}
 
 async function loadKey(key, fallback) {
   try {
     const res = await window.storage.get(key, true);
     return res ? JSON.parse(res.value) : fallback;
-  } catch (e) { return fallback; }
+  } catch { return fallback; }
 }
 async function saveKey(key, value) {
   try { await window.storage.set(key, JSON.stringify(value), true); }
@@ -104,6 +132,13 @@ const inputCls = "w-full border border-slate-300 rounded-md px-3 py-2 text-sm fo
 const inputInvalidCls = "border-red-400 focus:ring-red-500 focus:border-red-500";
 function TextInput({ invalid, className, ...props }) {
   return <input {...props} className={`${inputCls} ${invalid ? inputInvalidCls : ""} ${className || ""}`} />;
+}
+function DateInput({ onClick, ...props }) {
+  function openPicker(e) {
+    onClick?.(e);
+    try { e.currentTarget.showPicker?.(); } catch { /* browsers without a native picker still support typing */ }
+  }
+  return <TextInput {...props} type="date" onClick={openPicker} />;
 }
 function Select({ invalid, className, ...props }) {
   return <select {...props} className={`${inputCls} ${invalid ? inputInvalidCls : ""} ${className || ""}`} />;
@@ -155,19 +190,21 @@ export default function App() {
   const [coordinators, setCoordinators] = useState([]);
   const [vouchers, setVouchers] = useState([]);
   const [deathCalcs, setDeathCalcs] = useState([]);
+  const [bankTransactions, setBankTransactions] = useState([]);
   const [settings, setSettings] = useState({ associationName: "สมาคมฌาปนกิจสงเคราะห์", monthlyRate: 20, bankAccounts: [] });
 
   useEffect(() => {
     (async () => {
-      const [u, m, c, v, d, s] = await Promise.all([
+      const [u, m, c, v, d, b, s] = await Promise.all([
         loadKey("users", []),
         loadKey("members", []),
         loadKey("coordinators", []),
         loadKey("vouchers", []),
         loadKey("death-calcs", []),
+        loadKey("bank-transactions", []),
         loadKey("settings", { associationName: "สมาคมฌาปนกิจสงเคราะห์", monthlyRate: 20, bankAccounts: [] }),
       ]);
-      setUsers(u); setMembers(m); setCoordinators(c); setVouchers(v); setDeathCalcs(d); setSettings(s);
+      setUsers(u); setMembers(m); setCoordinators(c); setVouchers(v); setDeathCalcs(d); setBankTransactions(b); setSettings(s);
       setLoading(false);
     })();
   }, []);
@@ -177,12 +214,14 @@ export default function App() {
   async function persistCoordinators(next) { setCoordinators(next); await saveKey("coordinators", next); }
   async function persistVouchers(next) { setVouchers(next); await saveKey("vouchers", next); }
   async function persistDeathCalcs(next) { setDeathCalcs(next); await saveKey("death-calcs", next); }
+  async function persistBankTransactions(next) { setBankTransactions(next); await saveKey("bank-transactions", next); }
   async function persistSettings(next) { setSettings(next); await saveKey("settings", next); }
   async function resetAllData() {
     await persistMembers([]);
     await persistCoordinators([]);
     await persistVouchers([]);
     await persistDeathCalcs([]);
+    await persistBankTransactions([]);
   }
   async function restoreBackup(backup) {
     await persistUsers(backup.users);
@@ -190,6 +229,7 @@ export default function App() {
     await persistCoordinators(backup.coordinators);
     await persistVouchers(backup.vouchers);
     await persistDeathCalcs(backup.deathCalcs);
+    await persistBankTransactions(backup.bankTransactions || []);
     await persistSettings(backup.settings);
     setCurrentUser(null);
   }
@@ -214,6 +254,7 @@ export default function App() {
     { id: "members", label: "งานสมาชิก", icon: Users },
     { id: "registration", label: "งานทะเบียน", icon: ClipboardList },
     { id: "financial", label: "งานการเงิน", icon: Wallet },
+    { id: "dues", label: "ค้างชำระ", icon: CalendarDays },
     { id: "reports", label: "รายงานประจำวัน", icon: CalendarDays },
   ];
   if (currentUser.role === "admin") nav.push({ id: "settings", label: "ตั้งค่า/ผู้ใช้งาน", icon: SettingsIcon });
@@ -244,12 +285,13 @@ export default function App() {
           <div className="text-slate-400">ผู้ใช้งาน</div>
           <div className="font-medium text-slate-100">{currentUser.name} <span className="text-slate-400">({currentUser.role === "admin" ? "ผู้ดูแลระบบ" : "เจ้าหน้าที่"})</span></div>
           <button onClick={() => setCurrentUser(null)} className="mt-3 flex items-center gap-1.5 text-rose-300 hover:text-rose-200"><LogOut size={13} /> ออกจากระบบ</button>
+          <div className="mt-3 text-slate-500">เวอร์ชัน {APP_VERSION}</div>
         </div>
       </aside>
 
       {/* content */}
       <main className="flex-1 min-w-0">
-        {view === "dashboard" && <Dashboard members={members} vouchers={vouchers} settings={settings} />}
+        {view === "dashboard" && <Dashboard members={members} vouchers={vouchers} bankTransactions={bankTransactions} settings={settings} />}
         {view === "members" && (
           <MembersView
             members={members} setMembers={persistMembers}
@@ -269,14 +311,19 @@ export default function App() {
         {view === "financial" && (
           <FinancialView
             vouchers={vouchers} setVouchers={persistVouchers}
+            bankTransactions={bankTransactions} setBankTransactions={persistBankTransactions}
             members={members} settings={settings} currentUser={currentUser}
           />
         )}
-        {view === "reports" && <ReportsView vouchers={vouchers} settings={settings} />}
+        {view === "dues" && <DuesView members={members} vouchers={vouchers} settings={settings} onRecordPayment={(data)=>{
+          const seq = vouchers.filter(v=>v.type==="receipt").length + 1;
+          persistVouchers([...vouchers, { ...data, id: genId("RV"), type:"receipt", voucherNo:`RV-${data.date.replace(/-/g,"")}-${padNo(seq,3)}`, cancelled:false, verified:data.method==="cash", createdAt:Date.now(), createdBy:currentUser.name }]);
+        }} />}
+        {view === "reports" && <ReportsView vouchers={vouchers} bankTransactions={bankTransactions} members={members} deathCalcs={deathCalcs} settings={settings} />}
         {view === "settings" && currentUser.role === "admin" && (
           <SettingsView
             settings={settings} setSettings={persistSettings} users={users} setUsers={persistUsers}
-            members={members} coordinators={coordinators} vouchers={vouchers} deathCalcs={deathCalcs}
+            members={members} coordinators={coordinators} vouchers={vouchers} deathCalcs={deathCalcs} bankTransactions={bankTransactions}
             currentUser={currentUser} onResetAllData={resetAllData} onRestoreBackup={restoreBackup}
           />
         )}
@@ -329,6 +376,7 @@ function LoginScreen({ users, onCreateFirstAdmin, onLogin, assocName }) {
         <p className="text-xs text-slate-500 mt-5 text-center leading-relaxed">
           ระบบนี้ใช้สำหรับควบคุมการเข้าถึงภายในสมาคมเบื้องต้นเท่านั้น<br />ไม่ใช่ระบบยืนยันตัวตนระดับองค์กร
         </p>
+        <p className="text-[11px] text-slate-400 mt-2 text-center">เวอร์ชัน {APP_VERSION}</p>
       </div>
     </div>
   );
@@ -336,7 +384,7 @@ function LoginScreen({ users, onCreateFirstAdmin, onLogin, assocName }) {
 
 /* ============================== dashboard ============================== */
 
-function Dashboard({ members, vouchers, settings }) {
+function Dashboard({ members, vouchers, bankTransactions, settings }) {
   const active = members.filter(m => m.status === "active").length;
   const resigned = members.filter(m => m.status === "resigned").length;
   const deceased = members.filter(m => m.status === "deceased").length;
@@ -344,23 +392,24 @@ function Dashboard({ members, vouchers, settings }) {
   const todays = vouchers.filter(v => v.date === today && !v.cancelled);
   const receiptToday = todays.filter(v => v.type === "receipt").reduce((s, v) => s + Number(v.amount), 0);
   const paymentToday = todays.filter(v => v.type === "payment").reduce((s, v) => s + Number(v.amount), 0);
-  const cashBalance = vouchers.filter(v => !v.cancelled && v.method === "cash")
-    .reduce((s, v) => s + (v.type === "receipt" ? Number(v.amount) : -Number(v.amount)), 0);
-  const bankBalance = vouchers.filter(v => !v.cancelled && v.method === "bank")
-    .reduce((s, v) => s + (v.type === "receipt" ? Number(v.amount) : -Number(v.amount)), 0);
+  const { cash: cashBalance, bank: bankBalance } = balancesAt(vouchers, bankTransactions);
+  const duePeriod = currentMonth();
+  const paidMemberIds = new Set(vouchers.filter(v => !v.cancelled && v.category === "เงินสงเคราะห์รายเดือน" && v.paymentPeriod === duePeriod && v.memberId).map(v => v.memberId));
+  const overdue = members.filter(m => m.status === "active" && m.joinDate?.slice(0,7) <= duePeriod && !paidMemberIds.has(m.id)).length;
 
   const cards = [
     { label: "สมาชิกที่ใช้งาน", value: active, sub: `ลาออก ${resigned} · เสียชีวิต ${deceased}`, color: "text-emerald-700" },
     { label: "รับเงินวันนี้", value: `฿${money(receiptToday)}`, sub: `${todays.filter(v=>v.type==='receipt').length} รายการ`, color: "text-emerald-700" },
     { label: "จ่ายเงินวันนี้", value: `฿${money(paymentToday)}`, sub: `${todays.filter(v=>v.type==='payment').length} รายการ`, color: "text-rose-700" },
     { label: "เงินสดคงเหลือ", value: `฿${money(cashBalance)}`, sub: `เงินฝากธนาคาร ฿${money(bankBalance)}`, color: "text-slate-800" },
+    { label: "ค้างชำระเดือนนี้", value: overdue, sub: thaiMonthLabel(duePeriod), color: overdue ? "text-rose-700" : "text-emerald-700" },
   ];
 
   return (
     <div className="p-8 max-w-6xl">
       <h1 className="text-xl font-semibold text-slate-800 mb-1">บัญชีรายรับ-รายจ่าย</h1>
       <p className="text-sm text-slate-500 mb-6">{settings.associationName} · {toThaiDate(today)}</p>
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-5 gap-4">
         {cards.map((c, i) => (
           <div key={i} className="bg-white border border-slate-200 rounded-lg p-5">
             <div className="text-xs text-slate-500 mb-2">{c.label}</div>
@@ -412,9 +461,13 @@ function MembersView({ members, setMembers, coordinators, setCoordinators, setti
 
   function saveMember(data) {
     if (data.id) {
-      setMembers(members.map(m => m.id === data.id ? data : m));
+      setMembers(members.map(m => {
+        if (m.id !== data.id) return m;
+        if (m.status !== data.status) return { ...data, statusChangedDate: todayISO(), history:[...(m.history||[]), { at:Date.now(), by:currentUser.name, note:`เปลี่ยนสถานะเป็น ${STATUS_LABEL[data.status]}` }] };
+        return data;
+      }));
     } else {
-      const memberNo = "ท-" + padNo(members.length + 1);
+      const memberNo = nextMemberNo(members);
       setMembers([...members, { ...data, id: genId("MEM"), memberNo, history: [{ at: Date.now(), by: currentUser.name, note: "สมัครสมาชิกใหม่" }] }]);
     }
     setEditing(null);
@@ -616,7 +669,7 @@ function MemberFormModal({ member, coordinators, settings, onClose, onSave }) {
             {coordinators.map(c => <option key={c.id} value={c.id}>{c.name} ({c.village})</option>)}
           </Select>
         </Field>
-        <Field label="วันที่สมัคร" error={errors.joinDate}><TextInput invalid={!!errors.joinDate} type="date" value={f.joinDate} onChange={e=>set("joinDate",e.target.value)} /></Field>
+        <Field label="วันที่สมัคร" error={errors.joinDate}><DateInput invalid={!!errors.joinDate} value={f.joinDate} onChange={e=>set("joinDate",e.target.value)} /></Field>
         <Field label="อัตราเงินสงเคราะห์รายเดือน (บาท)"><TextInput type="number" value={f.monthlyRate} onChange={e=>set("monthlyRate",e.target.value)} /></Field>
         <Field label="สถานะสมาชิก">
           <Select value={f.status} onChange={e=>set("status",e.target.value)}>
@@ -738,7 +791,7 @@ function RegistrationView({ members, setMembers, coordinators, deathCalcs, setDe
       {action === "new" && (
         <MemberFormModal coordinators={coordinators} settings={settings} onClose={()=>setAction(null)}
           onSave={(data)=>{
-            const memberNo = "ท-" + padNo(members.length + 1);
+            const memberNo = nextMemberNo(members);
             setMembers([...members, { ...data, id: genId("MEM"), memberNo, history: [{at:Date.now(), by: currentUser.name, note:"สมัครสมาชิกใหม่ (งานทะเบียน)"}] }]);
             setAction(null);
           }} />
@@ -883,7 +936,7 @@ function DeathCalcFormModal({ member, members, settings, onClose, onSave }) {
 
   return (
     <Modal title={`คำนวณเงินสงเคราะห์ · ${member.name}`} onClose={onClose}>
-      <Field label="วันที่เสียชีวิต" error={errors.deathDate}><TextInput invalid={!!errors.deathDate} type="date" value={deathDate} onChange={e=>setDeathDate(e.target.value)} /></Field>
+      <Field label="วันที่เสียชีวิต" error={errors.deathDate}><DateInput invalid={!!errors.deathDate} value={deathDate} onChange={e=>setDeathDate(e.target.value)} /></Field>
       <Field label="จำนวนสมาชิกที่ใช้งานอยู่ (ไม่รวมผู้เสียชีวิต)"><TextInput disabled value={activeCount} /></Field>
       <Field label="อัตราเงินสงเคราะห์ต่อสมาชิก 1 คน (บาท)" error={errors.ratePerMember}><TextInput invalid={!!errors.ratePerMember} type="number" value={ratePerMember} onChange={e=>setRatePerMember(e.target.value)} /></Field>
       <Field label="หักค่าใช้จ่าย (ถ้ามี)"><TextInput type="number" value={deductions} onChange={e=>setDeductions(e.target.value)} /></Field>
@@ -975,9 +1028,10 @@ function DeathCalcPrint({ calc, settings, onClose }) {
 const RECEIPT_CATEGORIES = ["ค่าสมัครสมาชิก", "เงินสงเคราะห์รายเดือน", "เงินบริจาค", "อื่นๆ"];
 const PAYMENT_CATEGORIES = ["เงินสงเคราะห์ศพ", "ค่าใช้จ่ายดำเนินงาน", "ค่าธรรมเนียมธนาคาร", "อื่นๆ"];
 
-function FinancialView({ vouchers, setVouchers, members, settings, currentUser }) {
+function FinancialView({ vouchers, setVouchers, bankTransactions, setBankTransactions, members, settings, currentUser }) {
   const [tab, setTab] = useState("receipt");
   const [showForm, setShowForm] = useState(false);
+  const [showMonthlyForm, setShowMonthlyForm] = useState(false);
   const [cancelling, setCancelling] = useState(null);
   const [printing, setPrinting] = useState(null);
   const [viewingSlip, setViewingSlip] = useState(null);
@@ -1009,15 +1063,19 @@ function FinancialView({ vouchers, setVouchers, members, settings, currentUser }
         <h1 className="text-xl font-semibold text-slate-800">งานการเงิน</h1>
         <div className="flex items-center gap-2">
           {settings.promptPayQrImage && <Btn variant="ghost" onClick={()=>setShowQr(true)}><QrCode size={15}/> แสดง QR รับเงิน</Btn>}
-          <Btn onClick={()=>setShowForm(true)}><Plus size={15}/> {tab==="receipt" ? "บันทึกใบสำคัญรับเงิน" : "บันทึกใบสำคัญจ่ายเงิน"}</Btn>
+          {tab === "receipt" && <Btn variant="ghost" onClick={()=>setShowMonthlyForm(true)}><Plus size={15}/> รับชำระรายเดือน</Btn>}
+          {tab !== "banking" && <Btn onClick={()=>setShowForm(true)}><Plus size={15}/> {tab==="receipt" ? "บันทึกใบสำคัญรับเงิน" : "บันทึกใบสำคัญจ่ายเงิน"}</Btn>}
         </div>
       </div>
       <div className="flex gap-1 mb-5 border-b border-slate-200">
         <button onClick={()=>setTab("receipt")} className={`px-4 py-2 text-sm font-medium border-b-2 ${tab==="receipt"?"border-emerald-600 text-emerald-700":"border-transparent text-slate-500"}`}>ใบสำคัญรับเงิน</button>
         <button onClick={()=>setTab("payment")} className={`px-4 py-2 text-sm font-medium border-b-2 ${tab==="payment"?"border-emerald-600 text-emerald-700":"border-transparent text-slate-500"}`}>ใบสำคัญจ่ายเงิน</button>
+        <button onClick={()=>setTab("banking")} className={`px-4 py-2 text-sm font-medium border-b-2 ${tab==="banking"?"border-emerald-600 text-emerald-700":"border-transparent text-slate-500"}`}>ฝาก/ถอนธนาคาร</button>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+      {tab === "banking" ? (
+        <BankingView transactions={bankTransactions} setTransactions={setBankTransactions} vouchers={vouchers} settings={settings} currentUser={currentUser} />
+      ) : <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-xs text-slate-500"><tr>
             <th className="text-left px-4 py-3 font-medium">เลขที่</th>
@@ -1058,12 +1116,13 @@ function FinancialView({ vouchers, setVouchers, members, settings, currentUser }
             {list.length===0 && <EmptyRow colSpan={7} text="ยังไม่มีรายการ" />}
           </tbody>
         </table>
-      </div>
+      </div>}
 
       {showForm && (
         <VoucherFormModal type={tab} members={members} settings={settings} onClose={()=>setShowForm(false)} onSave={addVoucher}
           categories={tab==="receipt"?RECEIPT_CATEGORIES:PAYMENT_CATEGORIES} />
       )}
+      {showMonthlyForm && <MonthlyPaymentModal members={members} vouchers={vouchers} settings={settings} onClose={()=>setShowMonthlyForm(false)} onSave={addVoucher} />}
       {cancelling && <CancelModal voucher={cancelling} onClose={()=>setCancelling(null)} onConfirm={(reason)=>cancelVoucher(cancelling.id, reason)} />}
       {viewingSlip && <ImageLightbox src={viewingSlip} onClose={()=>setViewingSlip(null)} />}
       {showQr && (
@@ -1107,7 +1166,7 @@ function VoucherFormModal({ type, members, settings, categories, onClose, onSave
 
   return (
     <Modal title={type === "receipt" ? "บันทึกใบสำคัญรับเงิน" : "บันทึกใบสำคัญจ่ายเงิน"} onClose={onClose}>
-      <Field label="วันที่ (สามารถระบุย้อนหลังได้)" error={errors.date}><TextInput invalid={!!errors.date} type="date" value={f.date} max={todayISO()} onChange={e=>setF({...f,date:e.target.value})} /></Field>
+      <Field label="วันที่ (สามารถระบุย้อนหลังได้)" error={errors.date}><DateInput invalid={!!errors.date} value={f.date} max={todayISO()} onChange={e=>setF({...f,date:e.target.value})} /></Field>
       <Field label="ประเภทรายการ">
         <Select value={f.category} onChange={e=>setF({...f,category:e.target.value})}>
           {categories.map(c => <option key={c}>{c}</option>)}
@@ -1157,6 +1216,78 @@ function VoucherFormModal({ type, members, settings, categories, onClose, onSave
       </div>
     </Modal>
   );
+}
+
+function MonthlyPaymentModal({ members, vouchers, settings, initialMember, initialPeriod, onClose, onSave }) {
+  const [f, setF] = useState({ memberId: initialMember?.id || "", period: initialPeriod || currentMonth(), date: todayISO(), amount: initialMember?.monthlyRate || settings.monthlyRate || "", method: "cash", bankAccount: "" });
+  const [error, setError] = useState("");
+  const activeMembers = members.filter(m => m.status === "active");
+  const member = activeMembers.find(m => m.id === f.memberId);
+  function save() {
+    if (!member) { setError("กรุณาเลือกสมาชิก"); return; }
+    if (!f.period || !f.date || !f.amount || Number(f.amount) <= 0) { setError("กรุณากรอกงวด วันที่ และจำนวนเงินให้ครบ"); return; }
+    if (f.method === "bank" && !f.bankAccount) { setError("กรุณาเลือกบัญชีธนาคาร"); return; }
+    const duplicate = vouchers.some(v => !v.cancelled && v.category === "เงินสงเคราะห์รายเดือน" && v.memberId === member.id && v.paymentPeriod === f.period);
+    if (duplicate) { setError("สมาชิกคนนี้ชำระเงินสำหรับงวดนี้แล้ว"); return; }
+    onSave({ date:f.date, category:"เงินสงเคราะห์รายเดือน", partyName:member.name, memberId:member.id, memberNo:member.memberNo, paymentPeriod:f.period, amount:Number(f.amount), method:f.method, bankAccount:f.bankAccount, note:`ชำระเงินสงเคราะห์ประจำเดือน ${thaiMonthLabel(f.period)}`, slipImage:"" });
+    onClose();
+  }
+  return (
+    <Modal title="รับชำระเงินสงเคราะห์รายเดือน" onClose={onClose}>
+      <Field label="สมาชิก" error={error && !member ? error : ""}>
+        <Select value={f.memberId} onChange={e=>{ const m=activeMembers.find(x=>x.id===e.target.value); setF({...f, memberId:e.target.value, amount:m?.monthlyRate || settings.monthlyRate || ""}); setError(""); }}>
+          <option value="">— เลือกสมาชิก —</option>{activeMembers.map(m=><option key={m.id} value={m.id}>{m.memberNo} · {m.name}</option>)}
+        </Select>
+      </Field>
+      <Field label="งวดที่ชำระ"><TextInput type="month" value={f.period} onChange={e=>{setF({...f,period:e.target.value});setError("");}} /></Field>
+      <Field label="วันที่รับเงิน"><DateInput value={f.date} max={todayISO()} onChange={e=>setF({...f,date:e.target.value})} /></Field>
+      <Field label="จำนวนเงิน (บาท)"><TextInput type="number" value={f.amount} onChange={e=>setF({...f,amount:e.target.value})} /></Field>
+      <Field label="วิธีชำระ"><Select value={f.method} onChange={e=>setF({...f,method:e.target.value,bankAccount:e.target.value==="cash"?"":f.bankAccount})}><option value="cash">เงินสด</option><option value="bank">ธนาคาร / โอนเงิน</option></Select></Field>
+      {f.method === "bank" && <Field label="บัญชีธนาคาร"><Select value={f.bankAccount} onChange={e=>setF({...f,bankAccount:e.target.value})}><option value="">— เลือกบัญชี —</option>{(settings.bankAccounts||[]).map((b,i)=><option key={i} value={`${b.bankName} ${b.accountNo}`}>{b.bankName} · {b.accountNo}</option>)}</Select></Field>}
+      {error && <p className="text-xs text-rose-600 mb-3">{error}</p>}
+      <div className="flex justify-end gap-2"><Btn variant="ghost" onClick={onClose}>ยกเลิก</Btn><Btn onClick={save}><Check size={15}/> บันทึกการชำระ</Btn></div>
+    </Modal>
+  );
+}
+
+function BankingView({ transactions, setTransactions, vouchers, settings, currentUser }) {
+  const [formOpen, setFormOpen] = useState(false);
+  const [cancelling, setCancelling] = useState(null);
+  const { cash, bank } = balancesAt(vouchers, transactions);
+  const rows = transactions.slice().sort((a,b)=>b.createdAt-a.createdAt);
+  function add(data) { setTransactions([...transactions, { ...data, id:genId("BT"), transactionNo:`BT-${data.date.replace(/-/g,"")}-${padNo(transactions.length+1,3)}`, cancelled:false, createdAt:Date.now(), createdBy:currentUser.name }]); setFormOpen(false); }
+  return (
+    <div>
+      <div className="flex justify-between items-center mb-4"><div className="text-sm text-slate-500">คงเหลือ: เงินสด ฿{money(cash)} · เงินฝากธนาคาร ฿{money(bank)}</div><Btn onClick={()=>setFormOpen(true)}><Plus size={15}/> บันทึกฝาก/ถอน</Btn></div>
+      <div className="bg-white border border-slate-200 rounded-lg overflow-hidden"><table className="w-full text-sm"><thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="text-left px-4 py-3">เลขที่</th><th className="text-left px-4 py-3">วันที่</th><th className="text-left px-4 py-3">รายการ</th><th className="text-left px-4 py-3">บัญชีธนาคาร</th><th className="text-right px-4 py-3">จำนวนเงิน</th><th></th></tr></thead><tbody>
+        {rows.map(t=><tr key={t.id} className={`border-t border-slate-100 ${t.cancelled?"opacity-50":""}`}><td className="px-4 py-3 font-mono text-xs">{t.transactionNo}</td><td className="px-4 py-3">{toThaiDate(t.date)}</td><td className="px-4 py-3">{t.type==="deposit"?"นำเงินสดฝากธนาคาร":"ถอนเงินสดจากธนาคาร"}{t.cancelled && " (ยกเลิก)"}</td><td className="px-4 py-3">{t.bankAccount}</td><td className="px-4 py-3 text-right">฿{money(t.amount)}</td><td className="px-4 py-3 text-right">{!t.cancelled && <button onClick={()=>setCancelling(t)} className="text-slate-400 hover:text-rose-600"><Ban size={15}/></button>}</td></tr>)}
+        {rows.length===0 && <EmptyRow colSpan={6} text="ยังไม่มีรายการฝาก/ถอน" />}</tbody></table></div>
+      {formOpen && <BankTransactionModal settings={settings} cashBalance={cash} bankBalance={bank} onClose={()=>setFormOpen(false)} onSave={add} />}
+      {cancelling && <ConfirmModal title="ยกเลิกรายการธนาคาร" message="ยืนยันยกเลิกรายการนี้? ยอดเงินจะถูกคำนวณกลับอัตโนมัติ" danger onCancel={()=>setCancelling(null)} onConfirm={()=>{setTransactions(transactions.map(t=>t.id===cancelling.id?{...t,cancelled:true,cancelledAt:Date.now(),cancelledBy:currentUser.name}:t));setCancelling(null);}} />}
+    </div>
+  );
+}
+
+function BankTransactionModal({ settings, cashBalance, bankBalance, onClose, onSave }) {
+  const [f, setF] = useState({ type:"deposit", date:todayISO(), bankAccount:"", amount:"", note:"" });
+  const [error, setError] = useState("");
+  function save() { const available=f.type==="deposit"?cashBalance:bankBalance; if (!f.bankAccount || !f.amount || Number(f.amount)<=0) return setError("กรุณาเลือกบัญชีและกรอกจำนวนเงิน"); if(Number(f.amount)>available) return setError("จำนวนเงินมากกว่ายอดคงเหลือ"); onSave({...f,amount:Number(f.amount)}); }
+  return <Modal title="บันทึกรายการธนาคาร" onClose={onClose}><Field label="ประเภท"><Select value={f.type} onChange={e=>setF({...f,type:e.target.value})}><option value="deposit">นำเงินสดฝากธนาคาร</option><option value="withdraw">ถอนเงินสดจากธนาคาร</option></Select></Field><Field label="วันที่"><DateInput value={f.date} max={todayISO()} onChange={e=>setF({...f,date:e.target.value})}/></Field><Field label="บัญชีธนาคาร"><Select value={f.bankAccount} onChange={e=>setF({...f,bankAccount:e.target.value})}><option value="">— เลือกบัญชี —</option>{(settings.bankAccounts||[]).map((b,i)=><option key={i} value={`${b.bankName} ${b.accountNo}`}>{b.bankName} · {b.accountNo}</option>)}</Select></Field><Field label={`จำนวนเงิน (คงเหลือ ฿${money(f.type==="deposit"?cashBalance:bankBalance)})`}><TextInput type="number" value={f.amount} onChange={e=>setF({...f,amount:e.target.value})}/></Field><Field label="หมายเหตุ"><TextInput value={f.note} onChange={e=>setF({...f,note:e.target.value})}/></Field>{error&&<p className="text-xs text-rose-600 mb-3">{error}</p>}<div className="flex justify-end gap-2"><Btn variant="ghost" onClick={onClose}>ยกเลิก</Btn><Btn onClick={save}><Check size={15}/> บันทึก</Btn></div></Modal>;
+}
+
+function DuesView({ members, vouchers, settings, onRecordPayment }) {
+  const [period, setPeriod] = useState(currentMonth());
+  const [paymentFor, setPaymentFor] = useState(null);
+  const [printMembers, setPrintMembers] = useState(null);
+  const paidIds = new Set(vouchers.filter(v => !v.cancelled && v.category === "เงินสงเคราะห์รายเดือน" && v.paymentPeriod === period && v.memberId).map(v => v.memberId));
+  const dueMembers = members.filter(m => m.status === "active" && m.joinDate?.slice(0,7) <= period);
+  const overdue = dueMembers.filter(m => !paidIds.has(m.id));
+  if (printMembers) return <DebtLetterPrint members={printMembers} period={period} settings={settings} onClose={()=>setPrintMembers(null)} />;
+  return <div className="p-8 max-w-6xl"><div className="flex items-center justify-between mb-5"><div><h1 className="text-xl font-semibold text-slate-800">สมาชิกค้างชำระ</h1><p className="text-sm text-slate-500 mt-1">ตรวจการชำระเงินสงเคราะห์รายเดือน และออกหนังสือแจ้งเตือน</p></div><Btn variant="ghost" disabled={!overdue.length} onClick={()=>setPrintMembers(overdue)}><Printer size={15}/> พิมพ์จดหมายทั้งหมด ({overdue.length})</Btn></div><div className="bg-white border border-slate-200 rounded-lg p-4 mb-5 flex items-end justify-between"><div className="w-56"><Field label="เลือกงวด"><TextInput type="month" value={period} onChange={e=>setPeriod(e.target.value)} /></Field></div><div className={`text-sm font-semibold ${overdue.length?"text-rose-700":"text-emerald-700"}`}>{overdue.length ? `ค้างชำระ ${overdue.length} คน` : "สมาชิกชำระครบแล้ว"}</div></div><div className="bg-white border border-slate-200 rounded-lg overflow-hidden"><table className="w-full text-sm"><thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="text-left px-4 py-3">เลขทะเบียน</th><th className="text-left px-4 py-3">สมาชิก</th><th className="text-left px-4 py-3">หมู่บ้าน</th><th className="text-right px-4 py-3">อัตรา/เดือน</th><th className="text-left px-4 py-3">สถานะ</th><th></th></tr></thead><tbody>{dueMembers.map(m=>{const paid=paidIds.has(m.id);return <tr key={m.id} className="border-t border-slate-100"><td className="px-4 py-3 font-mono text-xs">{m.memberNo}</td><td className="px-4 py-3 font-medium">{m.name}</td><td className="px-4 py-3">{m.village||"-"}</td><td className="px-4 py-3 text-right">฿{money(m.monthlyRate||settings.monthlyRate)}</td><td className="px-4 py-3">{paid?<span className="text-xs font-medium text-emerald-700">ชำระแล้ว</span>:<span className="text-xs font-medium text-rose-700">ค้างชำระ</span>}</td><td className="px-4 py-3 text-right">{!paid&&<><button onClick={()=>setPaymentFor(m)} className="text-xs text-emerald-700 underline mr-3">บันทึกชำระ</button><button onClick={()=>setPrintMembers([m])} className="text-slate-400 hover:text-emerald-700"><Printer size={15}/></button></>}</td></tr>})}{dueMembers.length===0&&<EmptyRow colSpan={6} text="ไม่มีสมาชิกที่ถึงกำหนดชำระในงวดนี้"/>}</tbody></table></div>{paymentFor&&<MonthlyPaymentModal members={members} vouchers={vouchers} settings={settings} initialMember={paymentFor} initialPeriod={period} onClose={()=>setPaymentFor(null)} onSave={(data)=>{onRecordPayment(data);setPaymentFor(null);}} />}</div>;
+}
+
+function DebtLetterPrint({ members, period, settings, onClose }) {
+  return <div className="p-8 max-w-3xl mx-auto"><div className="print:hidden flex justify-end mb-4"><Btn variant="ghost" onClick={onClose}><X size={15}/> ปิด</Btn><Btn onClick={()=>window.print()}><Printer size={15}/> พิมพ์</Btn></div>{members.map((m,i)=><div key={m.id} className={`bg-white p-10 min-h-[70vh] ${i<members.length-1?"break-after-page":""}`}><h2 className="text-center font-semibold">{settings.associationName}</h2><p className="text-right text-sm mt-8">วันที่ {toThaiDate(todayISO())}</p><p className="mt-8">เรื่อง แจ้งเตือนการชำระเงินสงเคราะห์ประจำเดือน</p><p className="mt-5">เรียน {m.name} เลขทะเบียนสมาชิก {m.memberNo}</p><p className="mt-5 leading-relaxed">ตามที่ท่านเป็นสมาชิกของ {settings.associationName} ขอแจ้งให้ทราบว่าท่านยังมิได้ชำระเงินสงเคราะห์ประจำเดือน <b>{thaiMonthLabel(period)}</b> จำนวน <b>฿{money(m.monthlyRate||settings.monthlyRate)}</b> จึงขอความกรุณาชำระเงินให้สมาคมโดยเร็ว</p><p className="mt-8">ขอแสดงความนับถือ</p><p className="mt-12">........................................................<br/>ผู้มีอำนาจของสมาคม</p></div>)}</div>;
 }
 
 function CancelModal({ voucher, onClose, onConfirm }) {
@@ -1279,8 +1410,8 @@ function RangeModal({ onClose, onConfirm }) {
   const [error, setError] = useState("");
   return (
     <Modal title="พิมพ์รายงานตามช่วงวันที่" onClose={onClose}>
-      <Field label="วันที่เริ่มต้น"><TextInput type="date" value={start} onChange={e=>setStart(e.target.value)} /></Field>
-      <Field label="วันที่สิ้นสุด"><TextInput type="date" value={end} onChange={e=>setEnd(e.target.value)} /></Field>
+      <Field label="วันที่เริ่มต้น"><DateInput value={start} onChange={e=>{ setStart(e.target.value); setError(""); }} /></Field>
+      <Field label="วันที่สิ้นสุด"><DateInput value={end} onChange={e=>{ setEnd(e.target.value); setError(""); }} /></Field>
       {error && <p className="text-red-600 text-xs font-medium mb-2">{error}</p>}
       <div className="flex justify-end gap-2 mt-4">
         <Btn variant="ghost" onClick={onClose}>ยกเลิก</Btn>
@@ -1292,14 +1423,12 @@ function RangeModal({ onClose, onConfirm }) {
   );
 }
 
-function RangeReportPrint({ vouchers, settings, start, end, onClose }) {
+function RangeReportPrint({ vouchers, bankTransactions = [], settings, start, end, onClose }) {
   const inRange = vouchers.filter(v => v.date >= start && v.date <= end);
   const receipts = inRange.filter(v => v.type === "receipt" && !v.cancelled);
   const payments = inRange.filter(v => v.type === "payment" && !v.cancelled);
   const sumBy = (arr, method) => arr.filter(v=>v.method===method).reduce((s,v)=>s+Number(v.amount),0);
-  const upToEnd = vouchers.filter(v => !v.cancelled && v.date <= end);
-  const cashBalance = upToEnd.filter(v=>v.method==="cash").reduce((s,v)=>s+(v.type==="receipt"?Number(v.amount):-Number(v.amount)),0);
-  const bankBalance = upToEnd.filter(v=>v.method==="bank").reduce((s,v)=>s+(v.type==="receipt"?Number(v.amount):-Number(v.amount)),0);
+  const { cash: cashBalance, bank: bankBalance } = balancesAt(vouchers, bankTransactions, end);
 
   return (
     <div className="p-8 max-w-5xl mx-auto">
@@ -1338,20 +1467,21 @@ function RangeReportPrint({ vouchers, settings, start, end, onClose }) {
   );
 }
 
-function ReportsView({ vouchers, settings }) {
+function ReportsView({ vouchers, bankTransactions, members, deathCalcs, settings }) {
   const [date, setDate] = useState(todayISO());
   const [rangeModalOpen, setRangeModalOpen] = useState(false);
   const [rangePrint, setRangePrint] = useState(null);
+  const [reportMode, setReportMode] = useState("daily");
 
   const dayReceipts = vouchers.filter(v => v.date === date && v.type === "receipt" && !v.cancelled);
   const dayPayments = vouchers.filter(v => v.date === date && v.type === "payment" && !v.cancelled);
   const sumBy = (arr, method) => arr.filter(v=>v.method===method).reduce((s,v)=>s+Number(v.amount),0);
 
-  const upToDate = vouchers.filter(v => !v.cancelled && v.date <= date);
-  const cashBalance = upToDate.filter(v=>v.method==="cash").reduce((s,v)=>s+(v.type==="receipt"?Number(v.amount):-Number(v.amount)),0);
-  const bankBalance = upToDate.filter(v=>v.method==="bank").reduce((s,v)=>s+(v.type==="receipt"?Number(v.amount):-Number(v.amount)),0);
+  const { cash: cashBalance, bank: bankBalance } = balancesAt(vouchers, bankTransactions, date);
 
-  if (rangePrint) return <RangeReportPrint vouchers={vouchers} settings={settings} start={rangePrint.start} end={rangePrint.end} onClose={()=>setRangePrint(null)} />;
+  if (rangePrint) return <RangeReportPrint vouchers={vouchers} bankTransactions={bankTransactions} settings={settings} start={rangePrint.start} end={rangePrint.end} onClose={()=>setRangePrint(null)} />;
+  if (reportMode === "monthly") return <PeriodReports key="monthly" mode="monthly" vouchers={vouchers} bankTransactions={bankTransactions} members={members} deathCalcs={deathCalcs} settings={settings} onModeChange={setReportMode} />;
+  if (reportMode === "annual") return <PeriodReports key="annual" mode="annual" vouchers={vouchers} bankTransactions={bankTransactions} members={members} deathCalcs={deathCalcs} settings={settings} onModeChange={setReportMode} />;
 
   return (
     <div className="p-8 max-w-5xl">
@@ -1362,6 +1492,7 @@ function ReportsView({ vouchers, settings }) {
           <Btn onClick={()=>window.print()}><Printer size={15}/> พิมพ์รายงานวันนี้</Btn>
         </div>
       </div>
+      <div className="flex gap-1 mb-5 border-b border-slate-200 print:hidden"><button className="px-4 py-2 text-sm font-medium border-b-2 border-emerald-600 text-emerald-700">รายวัน</button><button onClick={()=>setReportMode("monthly")} className="px-4 py-2 text-sm text-slate-500 border-b-2 border-transparent">รายเดือน</button><button onClick={()=>setReportMode("annual")} className="px-4 py-2 text-sm text-slate-500 border-b-2 border-transparent">รายปี</button></div>
 
       <div className="flex gap-5 items-start">
         <div className="print:hidden">
@@ -1424,9 +1555,30 @@ function ReportTable({ rows }) {
   );
 }
 
+function PeriodReports({ mode, vouchers, bankTransactions, members, deathCalcs, settings, onModeChange }) {
+  const [period, setPeriod] = useState(mode === "monthly" ? currentMonth() : String(new Date().getFullYear()));
+  const prefix = mode === "monthly" ? period : `${period}-`;
+  const end = mode === "monthly" ? `${period}-31` : `${period}-12-31`;
+  const title = mode === "monthly" ? `รายงานประจำเดือน ${thaiMonthLabel(period)}` : `รายงานประจำปี ${Number(period) + 543}`;
+  const inPeriod = v => !v.cancelled && v.date?.startsWith(prefix);
+  const receipts = vouchers.filter(v => inPeriod(v) && v.type === "receipt");
+  const payments = vouchers.filter(v => inPeriod(v) && v.type === "payment");
+  const joined = members.filter(m => m.joinDate?.startsWith(prefix));
+  const resigned = members.filter(m => m.status === "resigned" && m.statusChangedDate?.startsWith(prefix));
+  const deceased = deathCalcs.filter(d => d.deathDate?.startsWith(prefix));
+  const duePeriod = mode === "monthly" ? period : null;
+  const eligible = duePeriod ? members.filter(m => m.status === "active" && m.joinDate?.slice(0,7) <= duePeriod) : [];
+  const paidIds = new Set(vouchers.filter(v => !v.cancelled && v.category === "เงินสงเคราะห์รายเดือน" && (mode === "monthly" ? v.paymentPeriod === period : v.paymentPeriod?.startsWith(period)) && v.memberId).map(v => v.memberId));
+  const overdue = duePeriod ? eligible.filter(m => !paidIds.has(m.id)) : [];
+  const sum = rows => rows.reduce((n,v)=>n+Number(v.amount||0),0);
+  const { cash, bank } = balancesAt(vouchers, bankTransactions, end);
+  return <div className="p-8 max-w-5xl"><div className="flex items-center justify-between mb-5 print:hidden"><h1 className="text-xl font-semibold text-slate-800">{title}</h1><Btn onClick={()=>window.print()}><Printer size={15}/> พิมพ์รายงาน</Btn></div><div className="flex gap-1 mb-5 border-b border-slate-200 print:hidden"><button onClick={()=>onModeChange("daily")} className="px-4 py-2 text-sm text-slate-500 border-b-2 border-transparent">รายวัน</button><button onClick={()=>onModeChange("monthly")} className={`px-4 py-2 text-sm font-medium border-b-2 ${mode==="monthly"?"border-emerald-600 text-emerald-700":"border-transparent text-slate-500"}`}>รายเดือน</button><button onClick={()=>onModeChange("annual")} className={`px-4 py-2 text-sm font-medium border-b-2 ${mode==="annual"?"border-emerald-600 text-emerald-700":"border-transparent text-slate-500"}`}>รายปี</button></div><div className="print:hidden w-56 mb-5"><Field label={mode==="monthly"?"เลือกเดือน":"เลือกปี"}><TextInput type={mode==="monthly"?"month":"number"} min="2020" max="2100" value={period} onChange={e=>setPeriod(e.target.value)} /></Field></div><div className="bg-white border border-slate-200 rounded-lg p-6"><h2 className="text-center font-semibold">{settings.associationName}</h2><p className="text-center text-sm text-slate-500 mb-6">{title}</p><div className="grid grid-cols-4 gap-4 mb-6"><SummaryCard label="สมาชิกเข้าใหม่" value={joined.length}/><SummaryCard label="ลาออก" value={resigned.length}/><SummaryCard label="เสียชีวิต" value={deceased.length}/><SummaryCard label={mode==="monthly"?"ค้างชำระ":"สมาชิกชำระรายเดือน"} value={mode==="monthly"?overdue.length:paidIds.size}/></div><h3 className="text-sm font-semibold text-emerald-700 mb-2">รายรับ ฿{money(sum(receipts))}</h3><ReportTable rows={receipts}/><h3 className="text-sm font-semibold text-rose-700 mt-6 mb-2">รายจ่าย ฿{money(sum(payments))}</h3><ReportTable rows={payments}/><div className="grid grid-cols-2 gap-4 mt-6"><div className="bg-slate-50 rounded-md p-4"><div className="text-xs text-slate-500">เงินสดคงเหลือ ณ สิ้นงวด</div><div className="text-lg font-semibold">฿{money(cash)}</div></div><div className="bg-slate-50 rounded-md p-4"><div className="text-xs text-slate-500">เงินฝากธนาคารคงเหลือ ณ สิ้นงวด</div><div className="text-lg font-semibold">฿{money(bank)}</div></div></div>{mode==="monthly"&&<p className="text-xs text-slate-400 mt-5">รายการลาออกนับจากวันที่บันทึกสถานะหลังอัปเดตเวอร์ชันนี้</p>}</div></div>;
+}
+function SummaryCard({ label, value }) { return <div className="bg-slate-50 rounded-md p-4"><div className="text-xs text-slate-500">{label}</div><div className="text-xl font-semibold text-slate-800 mt-1">{value}</div></div>; }
+
 /* ============================== settings ============================== */
 
-function SettingsView({ settings, setSettings, users, setUsers, members, coordinators, vouchers, deathCalcs, currentUser, onResetAllData, onRestoreBackup }) {
+function SettingsView({ settings, setSettings, users, setUsers, members, coordinators, vouchers, deathCalcs, bankTransactions, currentUser, onResetAllData, onRestoreBackup }) {
   const [f, setF] = useState(settings);
   const [newBank, setNewBank] = useState({ bankName: "", accountNo: "", accountName: "" });
   const [userForm, setUserForm] = useState(null);
@@ -1482,7 +1634,7 @@ function SettingsView({ settings, setSettings, users, setUsers, members, coordin
   function exportBackup() {
     const backup = {
       format: "ChaPanaKit-backup", version: 1, exportedAt: new Date().toISOString(),
-      users, members, coordinators, vouchers, deathCalcs, settings,
+      users, members, coordinators, vouchers, deathCalcs, bankTransactions, settings,
     };
     downloadFile(`ChaPanaKit-backup-${fileDateStamp()}.json`, JSON.stringify(backup, null, 2), "application/json");
   }
