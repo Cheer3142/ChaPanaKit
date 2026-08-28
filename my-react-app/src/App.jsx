@@ -185,7 +185,7 @@ export default function App() {
   }
 
   const nav = [
-    { id: "dashboard", label: "แดชบอร์ด", icon: LayoutDashboard },
+    { id: "dashboard", label: "งานบัญชี", icon: LayoutDashboard },
     { id: "members", label: "งานสมาชิก", icon: Users },
     { id: "registration", label: "งานทะเบียน", icon: ClipboardList },
     { id: "financial", label: "งานการเงิน", icon: Wallet },
@@ -329,7 +329,7 @@ function Dashboard({ members, vouchers, settings }) {
 
   return (
     <div className="p-8 max-w-6xl">
-      <h1 className="text-xl font-semibold text-slate-800 mb-1">แดชบอร์ด</h1>
+      <h1 className="text-xl font-semibold text-slate-800 mb-1">บัญชีรายรับ-รายจ่าย</h1>
       <p className="text-sm text-slate-500 mb-6">{settings.associationName} · {toThaiDate(today)}</p>
       <div className="grid grid-cols-4 gap-4">
         {cards.map((c, i) => (
